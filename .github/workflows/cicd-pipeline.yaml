@@ -1,0 +1,25 @@
+name: "Build"
+
+on:
+    workflow_dispatch: null
+    push: null
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+  statuses: write
+  pull-requests: read
+
+jobs:
+  conventional-commits:
+    uses: ./.github/workflows/pr-conventional-commits.yaml
+
+  link-check:
+    uses: ./.github/workflows/link-checker.yaml
+
+  linters:
+    uses: ./.github/workflows/super-linter.yaml
+    with:
+      full_scan: false
