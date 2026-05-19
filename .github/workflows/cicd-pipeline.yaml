@@ -1,8 +1,20 @@
+# Fork-only publish: images are pushed to ghcr.io/<fork-owner>/<component> on push to a fork.
+# Upstream (Netcracker/qubership-colly) always builds in dry-run and never publishes from this workflow.
 name: "Build"
 
 on:
-    workflow_dispatch: null
-    push: null
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'Additional tags for Docker images (comma separated)'
+        required: false
+        default: ''
+      dry-run:
+        description: 'Skip pushing images (fork only; upstream never publishes from this workflow)'
+        required: false
+        default: true
+        type: boolean
+  push:
 
 permissions:
   contents: read
@@ -23,3 +35,120 @@ jobs:
     uses: ./.github/workflows/super-linter.yaml
     with:
       full_scan: false
+
+  mvn-build:
+    needs:
+      - conventional-commits
+      - link-check
+      - linters
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        component:
+          - envgene-inventory-service
+          - environment-operational-service
+          - ui-service
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Check Docker version
+        run: docker version
+      - name: Build java
+        uses: netcracker/qubership-workflow-hub/actions/maven-snapshot-deploy@main
+        with:
+          java-version: 21
+          maven-command: clean install
+          working-directory: ${{ matrix.component }}
+          upload-artifact: "true"
+          artifact-id: ${{ matrix.component }}
+          maven-token: ${{ secrets.GITHUB_TOKEN }}
+
+  prepare-metadata:
+    needs: mvn-build
+    name: "Prepare Metadata"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      components: ${{ steps.load_component.outputs.components }}
+      platforms: ${{ steps.load_component.outputs.platforms }}
+      metadata: "${{ steps.metadata.outputs.result }}"
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Publish mode
+        shell: bash
+        run: |
+          {
+            echo "## Container publish mode"
+            if [ "${{ github.event.repository.fork }}" = "true" ]; then
+              echo "Fork repository: images publish to \`ghcr.io/${{ github.repository_owner }}/<component>:<tag>\` when dry-run is off."
+              echo "Manual run: disable **dry-run** to push; push events publish automatically."
+            else
+              echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Load Docker Configuration
+        id: load_component
+        shell: bash
+        run: |
+          verify=$(cat "$GITHUB_WORKSPACE/.github/docker-dev-config.json" | jq '
+            def verify_structure:
+              .components as $components
+              | .platforms as $platforms
+              | ($components | type == "array")
+              and (all($components[]; has("name") and has("file") and has("context")))
+              and ($platforms | type == "string");
+            verify_structure
+            | if . then true else false end
+          ')
+          if [ "${verify}" == "true" ]; then
+            echo "✅ $GITHUB_WORKSPACE/.github/docker-dev-config.json file is valid"
+            components=$(jq -c ".components" "$GITHUB_WORKSPACE/.github/docker-dev-config.json")
+            platforms=$(jq -c ".platforms" "$GITHUB_WORKSPACE/.github/docker-dev-config.json")
+          else
+            echo "❗ $GITHUB_WORKSPACE/.github/docker-dev-config.json file is invalid"
+            echo "❗ $GITHUB_WORKSPACE/.github/docker-dev-config.json file is invalid" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          echo "components=${components}" >> "$GITHUB_OUTPUT"
+          echo "platforms=${platforms}" >> "$GITHUB_OUTPUT"
+
+      - name: Calculate tags for images
+        uses: netcracker/qubership-workflow-hub/actions/metadata-action@v2.0.11
+        id: metadata
+        with:
+          short-sha: 11
+          extra-tags: ${{ github.event.inputs.tags }}
+          dry-run: ${{ github.event.repository.fork != true || (github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+          configuration-path: .github/metadata-action-config.yml
+
+  build:
+    name: Build Docker Images
+    needs: [prepare-metadata]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJson(needs.prepare-metadata.outputs.components) }}
+    steps:
+      - name: Docker
+        uses: netcracker/qubership-workflow-hub/actions/docker-action@v2.0.5
+        with:
+          ref: ${{ github.ref }}
+          dry-run: ${{ github.event.repository.fork != true || (github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+          download-artifact: true
+          download-artifact-path: '.'
+          download-artifact-merge-multiple: true
+          debug: true
+          component: ${{ toJson(matrix.component) }}
+          platforms: ${{ needs.prepare-metadata.outputs.platforms }}
+          tags: ${{ needs.prepare-metadata.outputs.metadata }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
