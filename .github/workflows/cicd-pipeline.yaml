@@ -27,12 +27,15 @@ permissions:
 jobs:
   conventional-commits:
     uses: ./.github/workflows/pr-conventional-commits.yaml
+    secrets: inherit
 
   link-check:
     uses: ./.github/workflows/link-checker.yaml
+    secrets: inherit
 
   linters:
     uses: ./.github/workflows/super-linter.yaml
+    secrets: inherit
     with:
       full_scan: false
 
