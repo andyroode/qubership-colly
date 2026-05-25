@@ -14,11 +14,24 @@ on:
         required: false
         default: true
         type: boolean
+      deploy:
+        description: 'Deploy published chart to EKS (fork, dry-run off; uses GitHub Environment secrets/vars)'
+        required: false
+        default: false
+        type: boolean
+      environment:
+        description: 'GitHub Environment for deploy (AWS/EKS secrets and vars)'
+        required: false
+        default: dev
+        type: string
   push:
 
 env:
   # GHCR OCI package path (chart name in repo stays qubership-colly)
   HELM_PACKAGE_NAME: colly-stack
+  # Deploy targets (override via GitHub Environment vars if needed)
+  COLLY_EKS_CLUSTER: Qubership-pioneer
+  COLLY_INSTALL_NAMESPACE: qubership-colly-test
 
 permissions:
   contents: read
@@ -94,6 +107,7 @@ jobs:
               echo "Fork repository: images publish to \`ghcr.io/${{ github.repository_owner }}/<component>:<tag>\` when dry-run is off."
               echo "Helm chart publishes to \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when dry-run is off."
               echo "Manual run: disable **dry-run** to push; push events publish automatically."
+              echo "Optional **deploy** (manual): installs chart to EKS via GitHub Environment \`dev\` / \`staging\` etc."
             else
               echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
             fi
@@ -168,6 +182,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      chart-version: ${{ steps.chart_version.outputs.value }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -233,9 +249,125 @@ jobs:
             echo "- Chart version: \`${{ steps.chart_version.outputs.value }}\`"
             if [ "${PUBLISH_CHARTS}" = "true" ]; then
               echo "- OCI: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
-              echo "- Install: \`helm upgrade --install qubership-colly oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }} -n qubership-colly --create-namespace\`"
+              echo "- Install: \`helm upgrade --install qubership-colly oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }} -n ${{ env.COLLY_INSTALL_NAMESPACE }}\`"
             else
               echo "- Chart packaged locally (publish skipped: dry-run or upstream)."
             fi
             echo "- Artifact: \`released-charts\` (packaged .tgz from this job)"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  helm-deploy:
+    name: Deploy to EKS (test)
+    needs: [publish-helm-chart]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy &&
+      github.event.repository.fork == true &&
+      !inputs.dry-run
+    environment: ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.0
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Verify tools
+        run: |
+          kubectl version --client
+          helm version
+          aws --version
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Configure kubeconfig for EKS
+        env:
+          EKS_CLUSTER: ${{ vars.TF_VAR_EKS_NEW_CLUSTERNAME || env.COLLY_EKS_CLUSTER }}
+        run: |
+          echo "EKS cluster: ${EKS_CLUSTER}"
+          aws eks update-kubeconfig \
+            --region "${{ vars.AWS_REGION || 'us-east-1' }}" \
+            --name "${EKS_CLUSTER}"
+
+      - name: Cluster healthcheck
+        env:
+          INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          echo "### Cluster connectivity"
+          kubectl cluster-info
+          echo "### Nodes"
+          kubectl get nodes -o wide
+          ready_nodes="$(kubectl get nodes -o json | jq '[.items[] | select(.status.conditions[]? | select(.type=="Ready" and .status=="True"))] | length')"
+          total_nodes="$(kubectl get nodes -o json | jq '.items | length')"
+          if [ "${ready_nodes}" -lt 1 ]; then
+            echo "::error::No Ready nodes in cluster (ready=${ready_nodes}, total=${total_nodes})"
+            exit 1
+          fi
+          echo "Ready nodes: ${ready_nodes}/${total_nodes}"
+          echo "### Namespace pre-check: ${INSTALL_NAMESPACE}"
+          if ! kubectl get namespace "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
+            echo "::error::Namespace ${INSTALL_NAMESPACE} does not exist. Create it before deploy."
+            exit 1
+          fi
+          phase="$(kubectl get namespace "${INSTALL_NAMESPACE}" -o jsonpath='{.status.phase}')"
+          echo "Namespace exists (phase=${phase})"
+          if [ "${phase}" != "Active" ]; then
+            echo "::error::Namespace ${INSTALL_NAMESPACE} is not Active"
+            exit 1
+          fi
+
+      - name: Deploy Colly stack
+        env:
+          INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+          HELM_RELEASE: ${{ vars.COLLY_HELM_RELEASE || 'qubership-colly' }}
+          CHART_VERSION: ${{ needs.publish-helm-chart.outputs.chart-version }}
+          COLLY_HELM_EXTRA_ARGS: ${{ vars.COLLY_HELM_EXTRA_ARGS }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          chart_ref="oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
+          echo "Deploying ${chart_ref} version ${CHART_VERSION} to namespace ${INSTALL_NAMESPACE}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+          # shellcheck disable=SC2086
+          helm upgrade --install "${HELM_RELEASE}" "${chart_ref}" \
+            --version "${CHART_VERSION}" \
+            --namespace "${INSTALL_NAMESPACE}" \
+            --wait \
+            --timeout 10m \
+            ${COLLY_HELM_EXTRA_ARGS}
+          helm registry logout ghcr.io
+
+      - name: Deployment healthcheck
+        env:
+          INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          echo "### Namespace: ${INSTALL_NAMESPACE}"
+          kubectl get namespace "${INSTALL_NAMESPACE}" -o wide
+          kubectl get deployments,services,pods -n "${INSTALL_NAMESPACE}"
+          for deploy in envgene-inventory-service environment-operational-service ui-service; do
+            if kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
+              echo "### Rollout: ${deploy}"
+              kubectl rollout status "deployment/${deploy}" -n "${INSTALL_NAMESPACE}" --timeout=10m
+            else
+              echo "Deployment ${deploy} not present (skipped)"
+            fi
+          done
+          echo "### Pod readiness"
+          not_ready="$(kubectl get pods -n "${INSTALL_NAMESPACE}" -o json | jq '[.items[] | select(.status.phase != "Running" and .status.phase != "Succeeded")] | length')"
+          if [ "${not_ready}" -gt 0 ]; then
+            kubectl get pods -n "${INSTALL_NAMESPACE}" -o wide
+            echo "::warning::Some pods are not Running/Succeeded (${not_ready})"
+          else
+            echo "All pods Running or Succeeded"
+          fi
