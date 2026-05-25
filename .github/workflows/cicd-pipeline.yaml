@@ -202,13 +202,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
 
-      - name: Upload packaged chart
-        uses: actions/upload-artifact@v4
-        with:
-          name: helm-chart-qubership-colly
-          path: ./*.tgz
-          if-no-files-found: error
-
       - name: Helm publish summary
         shell: bash
         env:
@@ -219,8 +212,10 @@ jobs:
             echo "- Image tag in values: \`${{ steps.image_tag.outputs.value }}\`"
             echo "- Chart version: \`${{ steps.chart_version.outputs.value }}\`"
             if [ "${PUBLISH_CHARTS}" = "true" ]; then
+              echo "- OCI: \`oci://ghcr.io/${{ github.repository }}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
               echo "- Install: \`helm upgrade --install qubership-colly oci://ghcr.io/${{ github.repository }}/qubership-colly --version ${{ steps.chart_version.outputs.value }} -n qubership-colly --create-namespace\`"
             else
               echo "- Chart packaged locally (publish skipped: dry-run or upstream)."
             fi
+            echo "- Artifact: \`released-charts\` (packaged .tgz from this job)"
           } >> "$GITHUB_STEP_SUMMARY"
