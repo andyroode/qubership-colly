@@ -1,4 +1,4 @@
-# Fork-only publish: images are pushed to ghcr.io/<fork-owner>/<component> on push to a fork.
+# Fork-only publish: images and Helm charts are pushed to ghcr.io/<fork-owner>/... on push to a fork.
 # Upstream (Netcracker/qubership-colly) always builds in dry-run and never publishes from this workflow.
 name: "Build"
 
@@ -10,7 +10,7 @@ on:
         required: false
         default: ''
       dry-run:
-        description: 'Skip pushing images (fork only; upstream never publishes from this workflow)'
+        description: 'Skip pushing images and Helm charts (fork only; upstream never publishes from this workflow)'
         required: false
         default: true
         type: boolean
@@ -88,6 +88,7 @@ jobs:
             echo "## Container publish mode"
             if [ "${{ github.event.repository.fork }}" = "true" ]; then
               echo "Fork repository: images publish to \`ghcr.io/${{ github.repository_owner }}/<component>:<tag>\` when dry-run is off."
+              echo "Helm chart publishes to \`oci://ghcr.io/${{ github.repository }}/qubership-colly:<chart-version>\` when dry-run is off."
               echo "Manual run: disable **dry-run** to push; push events publish automatically."
             else
               echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
@@ -155,3 +156,71 @@ jobs:
           tags: ${{ needs.prepare-metadata.outputs.metadata }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-helm-chart:
+    name: Publish Helm Chart
+    needs: [build, prepare-metadata]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Resolve image tag for chart values
+        id: image_tag
+        shell: bash
+        run: |
+          case "${{ github.ref_name }}" in
+            main)
+              echo "value=latest" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "value=dev" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Set chart version
+        id: chart_version
+        shell: bash
+        run: echo "value=0.0.0-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Update chart values and publish
+        id: update_chart
+        uses: netcracker/qubership-workflow-hub/actions/charts-values-update-action@v2.1.2
+        with:
+          release-version: ${{ steps.image_tag.outputs.value }}
+          chart-version: ${{ steps.chart_version.outputs.value }}
+          config-file: .github/helm-chart-dev-config.yaml
+          create-release-branch: false
+          version-replace-method: parse
+          package-charts: true
+          publish-charts: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+          default-tag: latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+
+      - name: Upload packaged chart
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart-qubership-colly
+          path: ./*.tgz
+          if-no-files-found: error
+
+      - name: Helm publish summary
+        shell: bash
+        env:
+          PUBLISH_CHARTS: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+        run: |
+          {
+            echo "## Helm chart"
+            echo "- Image tag in values: \`${{ steps.image_tag.outputs.value }}\`"
+            echo "- Chart version: \`${{ steps.chart_version.outputs.value }}\`"
+            if [ "${PUBLISH_CHARTS}" = "true" ]; then
+              echo "- Install: \`helm upgrade --install qubership-colly oci://ghcr.io/${{ github.repository }}/qubership-colly --version ${{ steps.chart_version.outputs.value }} -n qubership-colly --create-namespace\`"
+            else
+              echo "- Chart packaged locally (publish skipped: dry-run or upstream)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

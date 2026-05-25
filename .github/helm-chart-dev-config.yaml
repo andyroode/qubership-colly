@@ -1,0 +1,11 @@
+---
+# Fork CI: image refs use ghcr.io/<repository-owner>/... and tags from metadata-action (latest / dev).
+# ${owner} and ${tag} are substituted by charts-values-update-action (version-replace-method: parse).
+charts:
+  - name: qubership-colly
+    chart_file: charts/qubership-colly/Chart.yaml
+    values_file: charts/qubership-colly/values.yaml
+    image:
+      - ghcr.io/${owner}/envgene-inventory-service:${tag}
+      - ghcr.io/${owner}/environment-operational-service:${tag}
+      - ghcr.io/${owner}/ui-service:${tag}
