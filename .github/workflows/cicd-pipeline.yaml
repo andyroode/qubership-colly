@@ -16,6 +16,10 @@ on:
         type: boolean
   push:
 
+env:
+  # GHCR OCI package path (chart name in repo stays qubership-colly)
+  HELM_PACKAGE_NAME: colly-stack
+
 permissions:
   contents: read
   packages: write
@@ -88,7 +92,7 @@ jobs:
             echo "## Container publish mode"
             if [ "${{ github.event.repository.fork }}" = "true" ]; then
               echo "Fork repository: images publish to \`ghcr.io/${{ github.repository_owner }}/<component>:<tag>\` when dry-run is off."
-              echo "Helm chart publishes to \`oci://ghcr.io/${{ github.repository }}/qubership-colly:<chart-version>\` when dry-run is off."
+              echo "Helm chart publishes to \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when dry-run is off."
               echo "Manual run: disable **dry-run** to push; push events publish automatically."
             else
               echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
@@ -196,24 +200,40 @@ jobs:
           create-release-branch: false
           version-replace-method: parse
           package-charts: true
-          publish-charts: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+          publish-charts: false
           default-tag: latest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
 
+      - name: Publish helm chart package to GHCR
+        if: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+        shell: bash
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          for chart in "${GITHUB_WORKSPACE}/.cr-release-packages/"*.tgz; do
+            helm push "${chart}" "oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}"
+          done
+          helm registry logout ghcr.io
+
       - name: Helm publish summary
         shell: bash
         env:
           PUBLISH_CHARTS: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+          HELM_PACKAGE: ${{ env.HELM_PACKAGE_NAME }}
         run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
           {
             echo "## Helm chart"
+            echo "- Chart in repo: \`qubership-colly\` (unchanged)"
+            echo "- GHCR package: \`${HELM_PACKAGE}\`"
             echo "- Image tag in values: \`${{ steps.image_tag.outputs.value }}\`"
             echo "- Chart version: \`${{ steps.chart_version.outputs.value }}\`"
             if [ "${PUBLISH_CHARTS}" = "true" ]; then
-              echo "- OCI: \`oci://ghcr.io/${{ github.repository }}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
-              echo "- Install: \`helm upgrade --install qubership-colly oci://ghcr.io/${{ github.repository }}/qubership-colly --version ${{ steps.chart_version.outputs.value }} -n qubership-colly --create-namespace\`"
+              echo "- OCI: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
+              echo "- Install: \`helm upgrade --install qubership-colly oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }} -n qubership-colly --create-namespace\`"
             else
               echo "- Chart packaged locally (publish skipped: dry-run or upstream)."
             fi
