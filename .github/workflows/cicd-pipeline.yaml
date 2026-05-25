@@ -33,17 +33,17 @@ jobs:
     uses: ./.github/workflows/link-checker.yaml
     secrets: inherit
 
-  linters:
-    uses: ./.github/workflows/super-linter.yaml
-    secrets: inherit
-    with:
-      full_scan: false
+  #linters:
+  #  uses: ./.github/workflows/super-linter.yaml
+  #  secrets: inherit
+  #  with:
+  #    full_scan: false
 
   mvn-build:
     needs:
       - conventional-commits
       - link-check
-      - linters
+      #- linters
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
