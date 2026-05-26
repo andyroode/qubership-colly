@@ -1,0 +1,187 @@
+# Manual deploy of a published Helm chart to EKS.
+# Run after a successful Build workflow (fork, publish enabled).
+name: Deploy Colly
+
+on:
+  workflow_dispatch:
+    inputs:
+      chart-version:
+        description: >-
+          Helm chart version from Build workflow (job Publish Helm Chart summary),
+          e.g. 0.0.0-42. Also visible in GHCR package colly-stack → qubership-colly versions.
+        required: true
+        type: string
+      image-tag:
+        description: >-
+          Docker image tag for all Colly services (ghcr.io/<owner>/<service>:<tag>).
+          Leave empty to use image refs baked into the chart at publish time (usually latest on main, dev on other branches).
+        required: false
+        default: ''
+        type: string
+      helm-dry-run:
+        description: 'Helm dry-run only (render manifests, do not apply)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  HELM_PACKAGE_NAME: colly-stack
+  COLLY_EKS_CLUSTER: Qubership-pioneer
+  COLLY_INSTALL_NAMESPACE: qubership-colly-test
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    name: Deploy to EKS
+    if: github.event.repository.fork == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.0
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Verify tools
+        run: |
+          kubectl version --client
+          helm version
+          aws --version
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Configure kubeconfig for EKS
+        env:
+          EKS_CLUSTER: ${{ vars.TF_VAR_EKS_NEW_CLUSTERNAME || env.COLLY_EKS_CLUSTER }}
+        run: |
+          echo "EKS cluster: ${EKS_CLUSTER}"
+          aws eks update-kubeconfig \
+            --region "${{ vars.AWS_REGION || 'us-east-1' }}" \
+            --name "${EKS_CLUSTER}"
+
+      - name: Cluster healthcheck
+        env:
+          INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          echo "### Cluster connectivity"
+          kubectl cluster-info
+          echo "### Nodes"
+          kubectl get nodes -o wide
+          ready_nodes="$(kubectl get nodes -o json | jq '[.items[] | select(.status.conditions[]? | select(.type=="Ready" and .status=="True"))] | length')"
+          total_nodes="$(kubectl get nodes -o json | jq '.items | length')"
+          if [ "${ready_nodes}" -lt 1 ]; then
+            echo "::error::No Ready nodes in cluster (ready=${ready_nodes}, total=${total_nodes})"
+            exit 1
+          fi
+          echo "Ready nodes: ${ready_nodes}/${total_nodes}"
+          echo "### Namespace pre-check: ${INSTALL_NAMESPACE}"
+          if ! kubectl get namespace "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
+            echo "::error::Namespace ${INSTALL_NAMESPACE} does not exist. Create it before deploy."
+            exit 1
+          fi
+          phase="$(kubectl get namespace "${INSTALL_NAMESPACE}" -o jsonpath='{.status.phase}')"
+          echo "Namespace exists (phase=${phase})"
+          if [ "${phase}" != "Active" ]; then
+            echo "::error::Namespace ${INSTALL_NAMESPACE} is not Active"
+            exit 1
+          fi
+
+      - name: Resolve deploy parameters
+        id: params
+        shell: bash
+        env:
+          IMAGE_TAG_INPUT: ${{ github.event.inputs.image-tag }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          chart_ref="oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
+          echo "chart_ref=${chart_ref}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Deploy parameters"
+            echo "- Chart: \`${chart_ref}\`"
+            echo "- Chart version: \`${{ github.event.inputs.chart-version }}\`"
+            if [ -n "${IMAGE_TAG_INPUT}" ]; then
+              echo "- Image tag override: \`${IMAGE_TAG_INPUT}\`"
+              echo "  - \`ghcr.io/${owner}/envgene-inventory-service:${IMAGE_TAG_INPUT}\`"
+              echo "  - \`ghcr.io/${owner}/environment-operational-service:${IMAGE_TAG_INPUT}\`"
+              echo "  - \`ghcr.io/${owner}/ui-service:${IMAGE_TAG_INPUT}\`"
+            else
+              echo "- Image tag override: _(none — use refs from published chart)_"
+            fi
+            echo "- Namespace: \`${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
+            echo "- Helm dry-run: \`${{ github.event.inputs.helm-dry-run }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy Colly stack
+        env:
+          INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+          HELM_RELEASE: ${{ vars.COLLY_HELM_RELEASE || 'qubership-colly' }}
+          CHART_VERSION: ${{ github.event.inputs.chart-version }}
+          IMAGE_TAG: ${{ github.event.inputs.image-tag }}
+          COLLY_HELM_EXTRA_ARGS: ${{ vars.COLLY_HELM_EXTRA_ARGS }}
+          HELM_DRY_RUN: ${{ github.event.inputs.helm-dry-run }}
+        run: |
+          set -euo pipefail
+          owner="${{ steps.params.outputs.owner }}"
+          chart_ref="${{ steps.params.outputs.chart_ref }}"
+          image_set_args=""
+          if [ -n "${IMAGE_TAG}" ]; then
+            image_set_args="\
+              --set colly.envgeneInventoryService.image=ghcr.io/${owner}/envgene-inventory-service:${IMAGE_TAG} \
+              --set colly.environmentOperationalService.image=ghcr.io/${owner}/environment-operational-service:${IMAGE_TAG} \
+              --set colly.uiService.image=ghcr.io/${owner}/ui-service:${IMAGE_TAG}"
+          fi
+          dry_run_arg=""
+          if [ "${HELM_DRY_RUN}" = "true" ]; then
+            dry_run_arg="--dry-run"
+          fi
+          echo "Deploying ${chart_ref} version ${CHART_VERSION} to namespace ${INSTALL_NAMESPACE}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+          # shellcheck disable=SC2086
+          helm upgrade --install "${HELM_RELEASE}" "${chart_ref}" \
+            --version "${CHART_VERSION}" \
+            --namespace "${INSTALL_NAMESPACE}" \
+            --wait \
+            --timeout 10m \
+            ${dry_run_arg} \
+            ${image_set_args} \
+            ${COLLY_HELM_EXTRA_ARGS}
+          helm registry logout ghcr.io
+
+      - name: Deployment healthcheck
+        if: ${{ github.event.inputs.helm-dry-run != true }}
+        env:
+          INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          echo "### Namespace: ${INSTALL_NAMESPACE}"
+          kubectl get namespace "${INSTALL_NAMESPACE}" -o wide
+          kubectl get deployments,services,pods -n "${INSTALL_NAMESPACE}"
+          for deploy in envgene-inventory-service environment-operational-service ui-service; do
+            if kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
+              echo "### Rollout: ${deploy}"
+              kubectl rollout status "deployment/${deploy}" -n "${INSTALL_NAMESPACE}" --timeout=10m
+            else
+              echo "Deployment ${deploy} not present (skipped)"
+            fi
+          done
+          echo "### Pod readiness"
+          not_ready="$(kubectl get pods -n "${INSTALL_NAMESPACE}" -o json | jq '[.items[] | select(.status.phase != "Running" and .status.phase != "Succeeded")] | length')"
+          if [ "${not_ready}" -gt 0 ]; then
+            kubectl get pods -n "${INSTALL_NAMESPACE}" -o wide
+            echo "::warning::Some pods are not Running/Succeeded (${not_ready})"
+          else
+            echo "All pods Running or Succeeded"
+          fi
