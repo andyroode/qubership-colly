@@ -7,10 +7,11 @@ on:
     inputs:
       chart-version:
         description: >-
-          Helm chart version from Build workflow (job Publish Helm Chart summary),
-          e.g. 0.0.0-42. Also visible in GHCR package colly-stack → qubership-colly versions.
+          Helm chart version from Build workflow (job Publish Helm Chart summary).
+          Use latest — each publish overwrites the latest chart in GHCR.
         required: true
         type: string
+        default: latest
       image-tag:
         description: >-
           Docker image tag for all Colly services (ghcr.io/<owner>/<service>:<tag>).
@@ -120,8 +121,40 @@ jobs:
               echo "- Image tag override: _(none — use refs from published chart)_"
             fi
             echo "- Namespace: \`${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
+            echo "- Secrets: substituted at deploy into pulled chart values (not stored in GHCR package)"
             echo "- Helm dry-run: \`${{ github.event.inputs.helm-dry-run }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate GitHub secrets
+        shell: bash
+        env:
+          PROJECT_GIT_REPO_URL_EXAMPLE: ${{ secrets.PROJECT_GIT_REPO_URL_EXAMPLE }}
+          GH_TOKEN_EXAMPLE: ${{ secrets.GH_TOKEN_EXAMPLE }}
+          K8S_KEYCLOAK_EXAMPLE: ${{ secrets.K8S_KEYCLOAK_EXAMPLE }}
+          REDIS_HOST_EXAMPLE: ${{ secrets.REDIS_HOST_EXAMPLE }}
+          REDIS_HOST_ADMIN: ${{ secrets.REDIS_HOST_ADMIN }}
+          REDIS_HOST_PASSWORD: ${{ secrets.REDIS_HOST_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            PROJECT_GIT_REPO_URL_EXAMPLE \
+            GH_TOKEN_EXAMPLE \
+            K8S_KEYCLOAK_EXAMPLE \
+            REDIS_HOST_EXAMPLE \
+            REDIS_HOST_ADMIN \
+            REDIS_HOST_PASSWORD
+          do
+            value="${!name:-}"
+            if [ -z "${value}" ]; then
+              echo "::error::Missing repository secret: ${name}"
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo "Configure secrets listed in .github/deploy-settings.example"
+            exit 1
+          fi
 
       - name: Deploy Colly stack
         env:
@@ -129,36 +162,58 @@ jobs:
           HELM_RELEASE: ${{ vars.COLLY_HELM_RELEASE || 'qubership-colly' }}
           CHART_VERSION: ${{ github.event.inputs.chart-version }}
           IMAGE_TAG: ${{ github.event.inputs.image-tag }}
-          COLLY_HELM_EXTRA_ARGS: ${{ vars.COLLY_HELM_EXTRA_ARGS }}
           HELM_DRY_RUN: ${{ github.event.inputs.helm-dry-run }}
+          COLLY_HELM_EXTRA_ARGS: ${{ vars.COLLY_HELM_EXTRA_ARGS }}
+          COLLY_CLOUD_PUBLIC_HOST: ${{ vars.COLLY_CLOUD_PUBLIC_HOST }}
+          PROJECT_GIT_REPO_URL_EXAMPLE: ${{ secrets.PROJECT_GIT_REPO_URL_EXAMPLE }}
+          GH_TOKEN_EXAMPLE: ${{ secrets.GH_TOKEN_EXAMPLE }}
+          K8S_KEYCLOAK_EXAMPLE: ${{ secrets.K8S_KEYCLOAK_EXAMPLE }}
+          REDIS_HOST_EXAMPLE: ${{ secrets.REDIS_HOST_EXAMPLE }}
+          REDIS_HOST_ADMIN: ${{ secrets.REDIS_HOST_ADMIN }}
+          REDIS_HOST_PASSWORD: ${{ secrets.REDIS_HOST_PASSWORD }}
         run: |
           set -euo pipefail
           owner="${{ steps.params.outputs.owner }}"
           chart_ref="${{ steps.params.outputs.chart_ref }}"
-          image_set_args=""
+          chart_dir="$(mktemp -d)"
+          helm_set_args=(--set "NAMESPACE=${INSTALL_NAMESPACE}")
+          if [ -n "${COLLY_CLOUD_PUBLIC_HOST}" ]; then
+            helm_set_args+=(--set "CLOUD_PUBLIC_HOST=${COLLY_CLOUD_PUBLIC_HOST}")
+          fi
+          image_set_args=()
           if [ -n "${IMAGE_TAG}" ]; then
-            image_set_args="\
-              --set colly.envgeneInventoryService.image=ghcr.io/${owner}/envgene-inventory-service:${IMAGE_TAG} \
-              --set colly.environmentOperationalService.image=ghcr.io/${owner}/environment-operational-service:${IMAGE_TAG} \
-              --set colly.uiService.image=ghcr.io/${owner}/ui-service:${IMAGE_TAG}"
+            image_set_args+=(
+              --set "colly.envgeneInventoryService.image=ghcr.io/${owner}/envgene-inventory-service:${IMAGE_TAG}"
+              --set "colly.environmentOperationalService.image=ghcr.io/${owner}/environment-operational-service:${IMAGE_TAG}"
+              --set "colly.uiService.image=ghcr.io/${owner}/ui-service:${IMAGE_TAG}"
+            )
           fi
-          dry_run_arg=""
+          dry_run_arg=()
           if [ "${HELM_DRY_RUN}" = "true" ]; then
-            dry_run_arg="--dry-run"
+            dry_run_arg=(--dry-run)
           fi
-          echo "Deploying ${chart_ref} version ${CHART_VERSION} to namespace ${INSTALL_NAMESPACE}"
+          echo "Pulling ${chart_ref} version ${CHART_VERSION}"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
             -u "${{ github.actor }}" --password-stdin
+          helm pull "${chart_ref}" --version "${CHART_VERSION}" --untar -d "${chart_dir}"
+          values_file="${chart_dir}/qubership-colly/values.yaml"
+          envsubst \
+            '${PROJECT_GIT_REPO_URL_EXAMPLE} ${GH_TOKEN_EXAMPLE} ${K8S_KEYCLOAK_EXAMPLE} ${REDIS_HOST_EXAMPLE} ${REDIS_HOST_ADMIN} ${REDIS_HOST_PASSWORD}' \
+            < "${values_file}" > "${values_file}.tmp"
+          mv "${values_file}.tmp" "${values_file}"
+          echo "Applied secret placeholders in pulled chart values"
+          echo "Deploying to namespace ${INSTALL_NAMESPACE}"
           # shellcheck disable=SC2086
-          helm upgrade --install "${HELM_RELEASE}" "${chart_ref}" \
-            --version "${CHART_VERSION}" \
+          helm upgrade --install "${HELM_RELEASE}" "${chart_dir}/qubership-colly" \
             --namespace "${INSTALL_NAMESPACE}" \
             --wait \
             --timeout 10m \
-            ${dry_run_arg} \
-            ${image_set_args} \
+            "${dry_run_arg[@]}" \
+            "${helm_set_args[@]}" \
+            "${image_set_args[@]}" \
             ${COLLY_HELM_EXTRA_ARGS}
           helm registry logout ghcr.io
+          rm -rf "${chart_dir}"
 
       - name: Deployment healthcheck
         if: ${{ github.event.inputs.helm-dry-run != true }}

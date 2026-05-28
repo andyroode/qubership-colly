@@ -94,7 +94,7 @@ jobs:
               echo "Fork repository: images publish to \`ghcr.io/${{ github.repository_owner }}/<component>:<tag>\` when dry-run is off."
               echo "Helm chart publishes to \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when dry-run is off."
               echo "Manual run: disable **dry-run** to push; push events publish automatically."
-              echo "Deploy: run workflow **Deploy Colly** with \`chart-version\` from this run summary."
+              echo "Deploy: run workflow **Deploy Colly** with \`chart-version: latest\`."
             else
               echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
             fi
@@ -189,7 +189,7 @@ jobs:
       - name: Set chart version
         id: chart_version
         shell: bash
-        run: echo "value=0.0.0-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+        run: echo "value=latest" >> "$GITHUB_OUTPUT"
 
       - name: Update chart values and publish
         id: update_chart
@@ -235,7 +235,7 @@ jobs:
             if [ "${PUBLISH_CHARTS}" = "true" ]; then
               echo "- OCI: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
               echo "- **Deploy Colly** inputs for this build:"
-              echo "  - \`chart-version\`: \`${{ steps.chart_version.outputs.value }}\`"
+              echo "  - \`chart-version\`: \`latest\`"
               echo "  - \`image-tag\`: \`${{ steps.image_tag.outputs.value }}\` (optional override; chart already references this tag)"
             else
               echo "- Chart packaged locally (publish skipped: dry-run or upstream)."
