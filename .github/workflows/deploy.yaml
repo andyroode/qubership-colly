@@ -192,10 +192,34 @@ jobs:
           if [ "${HELM_DRY_RUN}" = "true" ]; then
             dry_run_arg=(--dry-run)
           fi
-          echo "Pulling ${chart_ref} version ${CHART_VERSION}"
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
-            -u "${{ github.actor }}" --password-stdin
-          helm pull "${chart_ref}" --version "${CHART_VERSION}" --untar -d "${chart_dir}"
+          oci_chart="ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
+          if [ "${CHART_VERSION}" = "latest" ]; then
+            if ! command -v oras >/dev/null 2>&1; then
+              ORAS_VERSION=1.2.2
+              curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
+                | tar -xz oras
+              sudo mv oras /usr/local/bin/
+            fi
+            echo "Pulling ${oci_chart}:latest via oras (helm does not accept latest as --version)"
+            echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io \
+              -u "${{ github.actor }}" --password-stdin
+            pkg_dir="${chart_dir}/pkg"
+            mkdir -p "${pkg_dir}"
+            oras pull "${oci_chart}:latest" -o "${pkg_dir}"
+            chart_tgz="$(find "${pkg_dir}" -name '*.tgz' -print -quit)"
+            if [ -z "${chart_tgz}" ]; then
+              echo "::error::No chart .tgz found after oras pull. Re-run Build so publish tags :latest in GHCR."
+              exit 1
+            fi
+            tar -xzf "${chart_tgz}" -C "${chart_dir}"
+            oras logout ghcr.io
+          else
+            echo "Pulling ${chart_ref} version ${CHART_VERSION}"
+            echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+              -u "${{ github.actor }}" --password-stdin
+            helm pull "${chart_ref}" --version "${CHART_VERSION}" --untar -d "${chart_dir}"
+            helm registry logout ghcr.io
+          fi
           values_file="${chart_dir}/qubership-colly/values.yaml"
           envsubst \
             '${PROJECT_GIT_REPO_URL_EXAMPLE} ${GH_TOKEN_EXAMPLE} ${K8S_KEYCLOAK_EXAMPLE} ${REDIS_HOST_EXAMPLE} ${REDIS_HOST_ADMIN} ${REDIS_HOST_PASSWORD}' \
@@ -212,7 +236,6 @@ jobs:
             "${helm_set_args[@]}" \
             "${image_set_args[@]}" \
             ${COLLY_HELM_EXTRA_ARGS}
-          helm registry logout ghcr.io
           rm -rf "${chart_dir}"
 
       - name: Deployment healthcheck
