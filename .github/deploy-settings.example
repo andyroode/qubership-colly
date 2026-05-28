@@ -1,0 +1,23 @@
+# GitHub repository settings for Deploy Colly workflow
+# Settings → Secrets and variables → Actions
+#
+# ── Secrets (substituted at deploy time only) ────────────────────────────────
+# Names must match ${...} placeholders in charts/qubership-colly/values.yaml
+# These values are NOT baked into the Helm chart published to GHCR.
+#
+# PROJECT_GIT_REPO_URL_EXAMPLE     Git URL of project configuration repo
+# GH_TOKEN_EXAMPLE                 Git token for project configuration repo
+# K8S_KEYCLOAK_EXAMPLE             Keycloak OIDC URL (all services idp.url)
+# REDIS_HOST_EXAMPLE               Redis connection URL
+# REDIS_HOST_ADMIN                 Redis username
+# REDIS_HOST_PASSWORD              Redis password
+#
+# ── Already used by deploy workflow ──────────────────────────────────────────
+# AWS_ACCESS_KEY_ID                (secret)
+# AWS_SECRET_ACCESS_KEY            (secret)
+# AWS_REGION                       (variable, default us-east-1 in workflow)
+# TF_VAR_EKS_NEW_CLUSTERNAME       (variable, optional override)
+# TF_VAR_COLLY_INSTALL_NAMESPACE   (variable, optional override)
+# COLLY_HELM_RELEASE               (variable, optional; default = install namespace, e.g. qubership-colly-test)
+# COLLY_HELM_EXTRA_ARGS            (variable, optional extra helm args)
+# COLLY_CLOUD_PUBLIC_HOST          (variable, optional public ingress host)

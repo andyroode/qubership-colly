@@ -121,6 +121,7 @@ jobs:
               echo "- Image tag override: _(none — use refs from published chart)_"
             fi
             echo "- Namespace: \`${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
+            echo "- Helm release: \`${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
             echo "- Secrets: substituted at deploy into pulled chart values (not stored in GHCR package)"
             echo "- Helm dry-run: \`${{ github.event.inputs.helm-dry-run }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -159,7 +160,7 @@ jobs:
       - name: Deploy Colly stack
         env:
           INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
-          HELM_RELEASE: ${{ vars.COLLY_HELM_RELEASE || 'qubership-colly' }}
+          HELM_RELEASE: ${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
           CHART_VERSION: ${{ github.event.inputs.chart-version }}
           IMAGE_TAG: ${{ github.event.inputs.image-tag }}
           HELM_DRY_RUN: ${{ github.event.inputs.helm-dry-run }}
