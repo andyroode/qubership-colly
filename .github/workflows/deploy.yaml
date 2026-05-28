@@ -8,7 +8,7 @@ on:
       chart-version:
         description: >-
           Helm chart version from Build workflow (job Publish Helm Chart summary).
-          Use latest — each publish overwrites the latest chart in GHCR.
+          Use latest (recommended) — points to the most recent publish. Helm packages use SemVer internally (0.0.0-<run>).
         required: true
         type: string
         default: latest
