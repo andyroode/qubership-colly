@@ -210,28 +210,14 @@ jobs:
       - name: Publish helm chart package to GHCR
         if: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
         shell: bash
-        env:
-          CHART_VERSION: ${{ steps.chart_version.outputs.value }}
         run: |
           set -euo pipefail
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
             -u "${{ github.actor }}" --password-stdin
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          chart_ref="ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
           for chart in "${GITHUB_WORKSPACE}/.cr-release-packages/"*.tgz; do
             helm push "${chart}" "oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}"
           done
-          # Helm requires SemVer in Chart.yaml; tag the OCI artifact as latest for deploy.
-          if ! command -v oras >/dev/null 2>&1; then
-            ORAS_VERSION=1.2.2
-            curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
-              | tar -xz oras
-            sudo mv oras /usr/local/bin/
-          fi
-          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io \
-            -u "${{ github.actor }}" --password-stdin
-          oras copy "${chart_ref}:${CHART_VERSION}" "${chart_ref}:latest"
-          oras logout ghcr.io
           helm registry logout ghcr.io
 
       - name: Helm publish summary
@@ -248,10 +234,9 @@ jobs:
             echo "- Image tag in values: \`${{ steps.image_tag.outputs.value }}\`"
             echo "- Chart version (SemVer in package): \`${{ steps.chart_version.outputs.value }}\`"
             if [ "${PUBLISH_CHARTS}" = "true" ]; then
-              echo "- OCI semver: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
-              echo "- OCI latest: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version latest\`"
+              echo "- OCI: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
               echo "- **Deploy Colly** inputs for this build:"
-              echo "  - \`chart-version\`: \`latest\` (or \`${{ steps.chart_version.outputs.value }}\` for a specific build)"
+              echo "  - \`chart-version\`: \`latest\` (resolves newest \`0.0.0-*\` in GHCR) or \`${{ steps.chart_version.outputs.value }}\`"
               echo "  - \`image-tag\`: \`${{ steps.image_tag.outputs.value }}\` (optional override; chart already references this tag)"
             else
               echo "- Chart packaged locally (publish skipped: dry-run or upstream)."
