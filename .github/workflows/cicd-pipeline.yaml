@@ -14,6 +14,16 @@ on:
         required: false
         default: true
         type: boolean
+      deploy:
+        description: 'Deploy to EKS after publish (fork only; push to fork always deploys when publish runs)'
+        required: false
+        default: false
+        type: boolean
+      helm-dry-run:
+        description: 'Helm dry-run only for deploy (no changes applied to cluster)'
+        required: false
+        default: false
+        type: boolean
   push:
 
 env:
@@ -97,7 +107,7 @@ jobs:
               echo "Fork dev versioning: [.github/dev-versioning.md](.github/dev-versioning.md) — image \`{branch}-v{N}\` (hyphens), chart \`0.0.0-{image-tag}\`."
               echo "Helm chart: \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when dry-run is off."
               echo "Manual run: disable **dry-run** to push; push events publish automatically."
-              echo "Deploy **Deploy Colly**: \`chart-version\` from job summary, or \`latest\`."
+              echo "After publish: deploy to EKS (push on fork, or manual run with **deploy** enabled)."
             else
               echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
             fi
@@ -256,9 +266,25 @@ jobs:
             echo "- Chart version: \`${{ needs.prepare-metadata.outputs.chart_version }}\`"
             if [ "${PUBLISH_CHARTS}" = "true" ]; then
               echo "- \`helm pull oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ needs.prepare-metadata.outputs.chart_version }}\`"
-              echo "- **Deploy Colly**: \`chart-version\` = \`${{ needs.prepare-metadata.outputs.chart_version }}\` or \`latest\`"
             else
               echo "- Chart packaged locally (publish skipped: dry-run or upstream)."
             fi
             echo "- Artifact: \`released-charts\` (packaged .tgz from this job)"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to EKS
+    needs: [publish-helm-chart, prepare-metadata]
+    if: >-
+      ${{ always() &&
+      needs.publish-helm-chart.result == 'success' &&
+      needs.prepare-metadata.result == 'success' &&
+      github.event.repository.fork == true &&
+      !(github.event_name == 'workflow_dispatch' && inputs.dry-run) &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy)) }}
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      chart-version: ${{ needs.prepare-metadata.outputs.chart_version }}
+      image-tag: ''
+      helm-dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.helm-dry-run }}
+    secrets: inherit

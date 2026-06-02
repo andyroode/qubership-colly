@@ -1,8 +1,25 @@
-# Manual deploy of a published Helm chart to EKS.
-# Run after a successful Build workflow (fork, publish enabled).
+# Deploy a published Helm chart to EKS (fork). Called from cicd-pipeline or manually.
 name: Deploy Colly
 
 on:
+  workflow_call:
+    inputs:
+      chart-version:
+        description: 'Helm chart version (e.g. 0.0.0-test-test-docker-tags-v5 from Build summary)'
+        required: true
+        type: string
+      image-tag:
+        description: 'Override image tag for all services (empty = use chart values)'
+        required: false
+        type: string
+        default: ''
+      helm-dry-run:
+        description: 'Helm dry-run only (render manifests, do not apply)'
+        required: false
+        type: boolean
+        default: false
+    secrets: inherit
+
   workflow_dispatch:
     inputs:
       chart-version:
@@ -102,7 +119,7 @@ jobs:
         id: params
         shell: bash
         env:
-          IMAGE_TAG_INPUT: ${{ github.event.inputs.image-tag }}
+          IMAGE_TAG_INPUT: ${{ inputs.image-tag }}
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           chart_ref="oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
@@ -111,7 +128,7 @@ jobs:
           {
             echo "## Deploy parameters"
             echo "- Chart: \`${chart_ref}\`"
-            echo "- Chart version: \`${{ github.event.inputs.chart-version }}\`"
+            echo "- Chart version: \`${{ inputs.chart-version }}\`"
             if [ -n "${IMAGE_TAG_INPUT}" ]; then
               echo "- Image tag override: \`${IMAGE_TAG_INPUT}\`"
               echo "  - \`ghcr.io/${owner}/envgene-inventory-service:${IMAGE_TAG_INPUT}\`"
@@ -123,7 +140,7 @@ jobs:
             echo "- Namespace: \`${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
             echo "- Helm release: \`${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
             echo "- Secrets: substituted at deploy into pulled chart values (not stored in GHCR package)"
-            echo "- Helm dry-run: \`${{ github.event.inputs.helm-dry-run }}\`"
+            echo "- Helm dry-run: \`${{ inputs.helm-dry-run }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Validate GitHub secrets
@@ -161,9 +178,9 @@ jobs:
         env:
           INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
           HELM_RELEASE: ${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
-          CHART_VERSION: ${{ github.event.inputs.chart-version }}
-          IMAGE_TAG: ${{ github.event.inputs.image-tag }}
-          HELM_DRY_RUN: ${{ github.event.inputs.helm-dry-run }}
+          CHART_VERSION: ${{ inputs.chart-version }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
+          HELM_DRY_RUN: ${{ inputs.helm-dry-run }}
           COLLY_HELM_EXTRA_ARGS: ${{ vars.COLLY_HELM_EXTRA_ARGS }}
           COLLY_CLOUD_PUBLIC_HOST: ${{ vars.COLLY_CLOUD_PUBLIC_HOST }}
           PROJECT_GIT_REPO_URL_EXAMPLE: ${{ secrets.PROJECT_GIT_REPO_URL_EXAMPLE }}
@@ -235,7 +252,7 @@ jobs:
           rm -rf "${chart_dir}"
 
       - name: Deployment healthcheck
-        if: ${{ github.event.inputs.helm-dry-run != true }}
+        if: ${{ inputs.helm-dry-run != true }}
         env:
           INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
         run: |

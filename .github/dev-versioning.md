@@ -24,7 +24,13 @@ docker pull ghcr.io/<owner>/envgene-inventory-service:<image-tag>
 helm pull oci://ghcr.io/<owner>/colly-stack/qubership-colly --version <chart-version>
 ```
 
-## Deploy Colly
+## Deploy (in `cicd-pipeline` or workflow **Deploy Colly**)
 
-- `chart-version`: from build summary, or `latest` (newest `0.0.0-*` in GHCR)
-- `image-tag`: leave empty if chart already has the correct image tag
+| Trigger | When deploy runs |
+|---------|------------------|
+| `push` to fork | After publish (if build jobs succeeded) |
+| `workflow_dispatch` | If **deploy** is enabled and **dry-run** is off |
+
+- Chart version: from the same build (`0.0.0-<image-tag>`), passed automatically from CI
+- `image-tag`: leave empty (images already in published chart values)
+- Requires AWS + app secrets (see `.github/deploy-settings.example`)
