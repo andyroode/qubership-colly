@@ -97,7 +97,7 @@ jobs:
               echo "Fork repository: on \`main\` images use \`latest\` and \`main\`; other branches use \`<branch>_v<N>\` only when dry-run is off."
               echo "Helm chart publishes to \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when dry-run is off."
               echo "Manual run: disable **dry-run** to push; push events publish automatically."
-              echo "Deploy: **Deploy Colly** — \`chart-version: latest\` on \`main\` (resolves \`main\`), or exact chart version from this build summary."
+              echo "Deploy: **Deploy Colly** — \`chart-version\` from summary (e.g. \`0.0.0-latest\`, \`0.0.0-feature-my-test-v1\`) or \`latest\`."
             else
               echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
             fi
@@ -147,11 +147,11 @@ jobs:
               echo "- Branch: \`main\` (fixed tags, no increment)"
               echo "- Tags: \`latest\`, \`main\`"
               echo "- Helm values tag: \`latest\`"
-              echo "- Helm chart version: \`${{ steps.calculate_image_tag.outputs.chart_version }}\`"
+              echo "- Helm chart: \`0.0.0-<image-tag>\` → \`${{ steps.calculate_image_tag.outputs.chart_version }}\`"
             else
               echo "- Primary tag: \`${{ steps.calculate_image_tag.outputs.value }}\`"
               echo "- Tags for build: \`${{ steps.calculate_image_tag.outputs.tags }}\`"
-              echo "- Helm chart version: \`${{ steps.calculate_image_tag.outputs.chart_version }}\`"
+              echo "- Helm chart: \`0.0.0-<image-tag>\` → \`${{ steps.calculate_image_tag.outputs.chart_version }}\`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -220,40 +220,40 @@ jobs:
         run: |
           set -euo pipefail
           chart_dir="${GITHUB_WORKSPACE}/charts/qubership-colly"
-          # Helm requires SemVer in Chart.yaml at package time; OCI tag is set to CHART_VERSION below.
-          internal_version="1.0.${GITHUB_RUN_NUMBER}"
-          sed -i "s|^version:.*|version: ${internal_version}|" "${chart_dir}/Chart.yaml"
+          sed -i "s|^version:.*|version: ${CHART_VERSION}|" "${chart_dir}/Chart.yaml"
           mkdir -p "${GITHUB_WORKSPACE}/.cr-release-packages"
           helm package "${chart_dir}" --destination "${GITHUB_WORKSPACE}/.cr-release-packages"
-          echo "internal_version=${internal_version}" >> "$GITHUB_OUTPUT"
-          echo "Packaged chart; OCI tag will be \`${CHART_VERSION}\` (internal ${internal_version} only for packaging)" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Install crane
-        if: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
-        uses: imjasonh/setup-crane@v0.4
+          echo "Packaged chart version \`${CHART_VERSION}\` (0.0.0-<docker-image-tag>)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish helm chart package to GHCR
         if: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
         shell: bash
         env:
           CHART_VERSION: ${{ needs.prepare-metadata.outputs.chart_version }}
-          INTERNAL_VERSION: ${{ steps.package_chart.outputs.internal_version }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           chart_tgz="$(ls "${GITHUB_WORKSPACE}/.cr-release-packages/"*.tgz)"
-          chart_ref="ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
+          chart_oci="oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
 
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
             -u "${{ github.actor }}" --password-stdin
           helm push "${chart_tgz}" "oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}"
 
-          echo "${{ secrets.GITHUB_TOKEN }}" | crane auth login ghcr.io -u "${{ github.actor }}" --password-stdin
-          crane tag "${chart_ref}:${INTERNAL_VERSION}" "${chart_ref}:${CHART_VERSION}"
-          crane delete "${chart_ref}:${INTERNAL_VERSION}" || true
+          verify_dir="$(mktemp -d)"
+          helm pull "${chart_oci}" --version "${CHART_VERSION}" -d "${verify_dir}"
+          rm -rf "${verify_dir}"
 
           helm registry logout ghcr.io
-          echo "Published \`${chart_ref}:${CHART_VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Published \`${chart_oci}:${CHART_VERSION}\`"
+            echo ""
+            echo "**Pull (not \`docker pull\`):**"
+            echo "\`\`\`"
+            echo "helm registry login ghcr.io -u USER --password-stdin"
+            echo "helm pull ${chart_oci} --version ${CHART_VERSION}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Helm publish summary
         shell: bash
@@ -267,11 +267,11 @@ jobs:
             echo "- Chart in repo: \`qubership-colly\` (unchanged)"
             echo "- GHCR package: \`${HELM_PACKAGE}\`"
             echo "- Image tag in values: \`${{ needs.prepare-metadata.outputs.image_tag }}\`"
-            echo "- Chart version (OCI tag): \`${{ needs.prepare-metadata.outputs.chart_version }}\`"
+            echo "- Chart version: \`${{ needs.prepare-metadata.outputs.chart_version }}\` (format \`0.0.0-<image-tag>\`)"
             if [ "${PUBLISH_CHARTS}" = "true" ]; then
-              echo "- OCI: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ needs.prepare-metadata.outputs.chart_version }}\`"
+              echo "- Pull: \`helm pull oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ needs.prepare-metadata.outputs.chart_version }}\`"
               echo "- **Deploy Colly** inputs for this build:"
-              echo "  - \`chart-version\`: \`latest\` (on \`main\` → \`main\`) or \`${{ needs.prepare-metadata.outputs.chart_version }}\`"
+              echo "  - \`chart-version\`: \`${{ needs.prepare-metadata.outputs.chart_version }}\` or \`latest\` (newest \`0.0.0-*\`)"
               echo "  - \`image-tag\`: \`${{ needs.prepare-metadata.outputs.image_tag }}\` (optional override; chart already references this tag)"
             else
               echo "- Chart packaged locally (publish skipped: dry-run or upstream)."

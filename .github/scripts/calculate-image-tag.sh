@@ -7,6 +7,12 @@ normalize_ref() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's|/|_|g' | sed 's|[^a-z0-9_.-]|_|g' | sed 's|_*$||'
 }
 
+# Dev Helm chart version: 0.0.0-<docker-tag> (Helm SemVer uses '-' after patch; '_' in image tags become '-').
+helm_chart_version_from_image_tag() {
+  local docker_tag="${1//_/-}"
+  echo "0.0.0-${docker_tag}"
+}
+
 ref_name="${REF_NAME:?}"
 ref_type="${REF_TYPE:?}"
 owner="${GITHUB_REPOSITORY_OWNER,,}"
@@ -14,7 +20,6 @@ owner="${GITHUB_REPOSITORY_OWNER,,}"
 if [ "${ref_name}" = "main" ]; then
   image_tag="latest"
   tags="latest, main"
-  chart_version="main"
 else
   if [ "${ref_type}" = "tag" ]; then
     prefix=$(normalize_ref "${ref_name#v}")
@@ -55,8 +60,9 @@ else
   next_ver=$((max_ver + 1))
   image_tag="${prefix}_v${next_ver}"
   tags="${image_tag}"
-  chart_version="${image_tag}"
 fi
+
+chart_version="$(helm_chart_version_from_image_tag "${image_tag}")"
 
 if [ -n "${EXTRA_TAGS:-}" ]; then
   IFS=',' read -ra extra <<< "${EXTRA_TAGS}"

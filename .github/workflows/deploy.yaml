@@ -8,7 +8,7 @@ on:
       chart-version:
         description: >-
           Helm chart version from Build workflow (job Publish Helm Chart summary).
-          Use latest on main (resolves chart tag main), or the exact dev tag from Build summary (e.g. feature_my_test_v1).
+          Dev chart format 0.0.0-<image-tag> from Build summary (e.g. 0.0.0-latest, 0.0.0-feature-my-test-v1), or latest. Pull with helm, not docker.
         required: true
         type: string
         default: latest
@@ -201,9 +201,8 @@ jobs:
               "https://ghcr.io/token?scope=repository:${repo_path}:pull" | jq -r '.token')"
             tags="$(curl -fsSL -H "Authorization: Bearer ${ghcr_token}" \
               "https://ghcr.io/v2/${repo_path}/tags/list" | jq -r '.tags[]? // empty')"
-            if echo "${tags}" | grep -qx 'main'; then
-              resolve_chart_version="main"
-            else
+            resolve_chart_version="$(echo "${tags}" | grep -E '^0\.0\.0-' | sort -V | tail -1)"
+            if [ -z "${resolve_chart_version}" ]; then
               resolve_chart_version="$(echo "${tags}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)"
             fi
             if [ -z "${resolve_chart_version}" ]; then

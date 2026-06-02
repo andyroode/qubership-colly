@@ -1,5 +1,5 @@
 ---
-# Fork CI dev builds: images latest/{branch}_v{N}; chart OCI tag main or {branch}_v{N} (same as image tag on main uses main).
+# Fork CI dev builds: image tag latest or {branch}_v{N}; chart version 0.0.0-<image-tag> (_ in image tag → - in chart).
 # ${owner} and ${tag} in image lines are substituted by charts-values-update-action (version-replace-method: parse).
 # Other ${VAR} placeholders stay unresolved in the published chart and are substituted at deploy time.
 charts:
