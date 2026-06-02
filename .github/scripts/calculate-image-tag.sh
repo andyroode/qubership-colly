@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Computes Docker/Helm image tag(s) for CI. Writes value= and tags= to GITHUB_OUTPUT.
+# Computes Docker image tag(s) and dev Helm chart version for CI.
+# Writes value=, tags=, chart_version= to GITHUB_OUTPUT.
 set -euo pipefail
 
 normalize_ref() {
@@ -13,6 +14,7 @@ owner="${GITHUB_REPOSITORY_OWNER,,}"
 if [ "${ref_name}" = "main" ]; then
   image_tag="latest"
   tags="latest, main"
+  chart_version="main"
 else
   if [ "${ref_type}" = "tag" ]; then
     prefix=$(normalize_ref "${ref_name#v}")
@@ -53,6 +55,7 @@ else
   next_ver=$((max_ver + 1))
   image_tag="${prefix}_v${next_ver}"
   tags="${image_tag}"
+  chart_version="${image_tag}"
 fi
 
 if [ -n "${EXTRA_TAGS:-}" ]; then
@@ -66,4 +69,5 @@ fi
 {
   echo "value=${image_tag}"
   echo "tags=${tags}"
+  echo "chart_version=${chart_version}"
 } >> "${GITHUB_OUTPUT:?}"

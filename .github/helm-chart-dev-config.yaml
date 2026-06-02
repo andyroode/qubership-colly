@@ -1,5 +1,5 @@
 ---
-# Fork CI: image refs use ghcr.io/<repository-owner>/... — latest on main, {branch}_v{N} on other branches.
+# Fork CI dev builds: images latest/{branch}_v{N}; chart OCI tag main or {branch}_v{N} (same as image tag on main uses main).
 # ${owner} and ${tag} in image lines are substituted by charts-values-update-action (version-replace-method: parse).
 # Other ${VAR} placeholders stay unresolved in the published chart and are substituted at deploy time.
 charts:

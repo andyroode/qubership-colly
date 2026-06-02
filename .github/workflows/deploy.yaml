@@ -8,7 +8,7 @@ on:
       chart-version:
         description: >-
           Helm chart version from Build workflow (job Publish Helm Chart summary).
-          Use latest (recommended) — deploy resolves the newest 0.0.0-<run> tag from GHCR.
+          Use latest on main (resolves chart tag main), or the exact dev tag from Build summary (e.g. feature_my_test_v1).
         required: true
         type: string
         default: latest
@@ -196,13 +196,14 @@ jobs:
           resolve_chart_version="${CHART_VERSION}"
           if [ "${resolve_chart_version}" = "latest" ]; then
             repo_path="${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
-            echo "Resolving latest chart version from GHCR tags (helm requires SemVer, not latest)"
+            echo "Resolving latest dev chart tag from GHCR"
             ghcr_token="$(curl -fsSL -u "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
               "https://ghcr.io/token?scope=repository:${repo_path}:pull" | jq -r '.token')"
             tags="$(curl -fsSL -H "Authorization: Bearer ${ghcr_token}" \
               "https://ghcr.io/v2/${repo_path}/tags/list" | jq -r '.tags[]? // empty')"
-            resolve_chart_version="$(echo "${tags}" | grep -E '^0\.0\.0-[0-9]+$' | sort -t'-' -k2 -n | tail -1)"
-            if [ -z "${resolve_chart_version}" ]; then
+            if echo "${tags}" | grep -qx 'main'; then
+              resolve_chart_version="main"
+            else
               resolve_chart_version="$(echo "${tags}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)"
             fi
             if [ -z "${resolve_chart_version}" ]; then
