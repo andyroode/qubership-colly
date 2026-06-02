@@ -52,7 +52,7 @@ else
 
   next_ver=$((max_ver + 1))
   image_tag="${prefix}_v${next_ver}"
-  tags="${image_tag}, dev"
+  tags="${image_tag}"
 fi
 
 if [ -n "${EXTRA_TAGS:-}" ]; then

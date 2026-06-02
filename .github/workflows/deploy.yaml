@@ -15,7 +15,7 @@ on:
       image-tag:
         description: >-
           Docker image tag for all Colly services (ghcr.io/<owner>/<service>:<tag>).
-          Leave empty to use image refs baked into the chart at publish time (usually latest on main, dev on other branches).
+          Leave empty to use image refs baked into the chart at publish time (latest on main, or branch tag e.g. feature_x_v1).
         required: false
         default: ''
         type: string

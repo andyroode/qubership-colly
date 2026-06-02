@@ -93,7 +93,7 @@ jobs:
           {
             echo "## Container publish mode"
             if [ "${{ github.event.repository.fork }}" = "true" ]; then
-              echo "Fork repository: on \`main\` images use \`latest\` and \`main\`; other branches use \`<branch>_v<N>\` (+ \`dev\`) when dry-run is off."
+              echo "Fork repository: on \`main\` images use \`latest\` and \`main\`; other branches use \`<branch>_v<N>\` only when dry-run is off."
               echo "Helm chart publishes to \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when dry-run is off."
               echo "Manual run: disable **dry-run** to push; push events publish automatically."
               echo "Deploy: run workflow **Deploy Colly** with \`chart-version: latest\`."
