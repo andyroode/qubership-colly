@@ -8,14 +8,14 @@ on:
       chart-version:
         description: >-
           Helm chart version from Build workflow (job Publish Helm Chart summary).
-          Dev chart format 0.0.0-<image-tag> from Build summary (e.g. 0.0.0-latest, 0.0.0-feature-my-test-v1), or latest. Pull with helm, not docker.
+          From Build summary (.github/dev-versioning.md): chart 0.0.0-<image-tag> (e.g. 0.0.0-test-test-docker-tags-v5), or latest. Use helm pull, not docker pull.
         required: true
         type: string
         default: latest
       image-tag:
         description: >-
           Docker image tag for all Colly services (ghcr.io/<owner>/<service>:<tag>).
-          Leave empty to use image refs baked into the chart at publish time (latest on main, or branch tag e.g. feature_x_v1).
+          Leave empty to use image refs baked into the chart at publish time (latest on main, or branch tag e.g. feature-x-v1).
         required: false
         default: ''
         type: string

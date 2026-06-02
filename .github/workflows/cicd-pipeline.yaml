@@ -94,10 +94,10 @@ jobs:
           {
             echo "## Container publish mode"
             if [ "${{ github.event.repository.fork }}" = "true" ]; then
-              echo "Fork repository: on \`main\` images use \`latest\` and \`main\`; other branches use \`<branch>_v<N>\` only when dry-run is off."
-              echo "Helm chart publishes to \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when dry-run is off."
+              echo "Fork dev versioning: [.github/dev-versioning.md](.github/dev-versioning.md) — image \`{branch}-v{N}\` (hyphens), chart \`0.0.0-{image-tag}\`."
+              echo "Helm chart: \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when dry-run is off."
               echo "Manual run: disable **dry-run** to push; push events publish automatically."
-              echo "Deploy: **Deploy Colly** — \`chart-version\` from summary (e.g. \`0.0.0-latest\`, \`0.0.0-feature-my-test-v1\`) or \`latest\`."
+              echo "Deploy **Deploy Colly**: \`chart-version\` from job summary, or \`latest\`."
             else
               echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
             fi
@@ -139,21 +139,7 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-        run: |
-          bash "${GITHUB_WORKSPACE}/.github/scripts/calculate-image-tag.sh"
-          {
-            echo "### Docker image tags"
-            if [ "${{ github.ref_name }}" = "main" ]; then
-              echo "- Branch: \`main\` (fixed tags, no increment)"
-              echo "- Tags: \`latest\`, \`main\`"
-              echo "- Helm values tag: \`latest\`"
-              echo "- Helm chart: \`0.0.0-<image-tag>\` → \`${{ steps.calculate_image_tag.outputs.chart_version }}\`"
-            else
-              echo "- Primary tag: \`${{ steps.calculate_image_tag.outputs.value }}\`"
-              echo "- Tags for build: \`${{ steps.calculate_image_tag.outputs.tags }}\`"
-              echo "- Helm chart: \`0.0.0-<image-tag>\` → \`${{ steps.calculate_image_tag.outputs.chart_version }}\`"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/calculate-image-tag.sh"
 
   build:
     name: Build Docker Images
@@ -223,7 +209,7 @@ jobs:
           sed -i "s|^version:.*|version: ${CHART_VERSION}|" "${chart_dir}/Chart.yaml"
           mkdir -p "${GITHUB_WORKSPACE}/.cr-release-packages"
           helm package "${chart_dir}" --destination "${GITHUB_WORKSPACE}/.cr-release-packages"
-          echo "Packaged chart version \`${CHART_VERSION}\` (0.0.0-<docker-image-tag>)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Packaged chart \`${CHART_VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish helm chart package to GHCR
         if: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
@@ -266,13 +252,11 @@ jobs:
             echo "## Helm chart"
             echo "- Chart in repo: \`qubership-colly\` (unchanged)"
             echo "- GHCR package: \`${HELM_PACKAGE}\`"
-            echo "- Image tag in values: \`${{ needs.prepare-metadata.outputs.image_tag }}\`"
-            echo "- Chart version: \`${{ needs.prepare-metadata.outputs.chart_version }}\` (format \`0.0.0-<image-tag>\`)"
+            echo "- Image tag: \`${{ needs.prepare-metadata.outputs.image_tag }}\`"
+            echo "- Chart version: \`${{ needs.prepare-metadata.outputs.chart_version }}\`"
             if [ "${PUBLISH_CHARTS}" = "true" ]; then
-              echo "- Pull: \`helm pull oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ needs.prepare-metadata.outputs.chart_version }}\`"
-              echo "- **Deploy Colly** inputs for this build:"
-              echo "  - \`chart-version\`: \`${{ needs.prepare-metadata.outputs.chart_version }}\` or \`latest\` (newest \`0.0.0-*\`)"
-              echo "  - \`image-tag\`: \`${{ needs.prepare-metadata.outputs.image_tag }}\` (optional override; chart already references this tag)"
+              echo "- \`helm pull oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ needs.prepare-metadata.outputs.chart_version }}\`"
+              echo "- **Deploy Colly**: \`chart-version\` = \`${{ needs.prepare-metadata.outputs.chart_version }}\` or \`latest\`"
             else
               echo "- Chart packaged locally (publish skipped: dry-run or upstream)."
             fi

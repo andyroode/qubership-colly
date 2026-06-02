@@ -1,5 +1,4 @@
-# Used by build-project.yaml (metadata-action).
-# cicd-pipeline.yaml: main -> latest; other branches -> {branch_with_underscores}_v{N}.
+# Used only by manual build-project.yaml (metadata-action). Fork push builds use cicd-pipeline + dev-versioning.md.
 branches-template:
   - main: "latest, main"
   - "feature/*": "{{ref-name}}-{{timestamp}}, {{dist-tag}}"
