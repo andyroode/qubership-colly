@@ -1,7 +1,7 @@
 # Used by build-project.yaml (metadata-action).
 # cicd-pipeline.yaml: main -> latest; other branches -> {branch_with_underscores}_v{N}.
 branches-template:
-  - main: "v{{major}}.{{minor}}.{{patch}}-{{date}}, {{dist-tag}}"
+  - main: "latest, main"
   - "feature/*": "{{ref-name}}-{{timestamp}}, {{dist-tag}}"
   - "bugfix/*": "{{ref-name}}-{{timestamp}}, {{dist-tag}}"
   - tag: "v{{major}}.{{minor}}.{{patch}}, {{dist-tag}}"
