@@ -1,5 +1,5 @@
 ---
-# Fork CI: image refs use ghcr.io/<repository-owner>/... and tags from metadata-action (latest / dev).
+# Fork CI: image refs use ghcr.io/<repository-owner>/... — latest on main, {branch}_v{N} on other branches.
 # ${owner} and ${tag} in image lines are substituted by charts-values-update-action (version-replace-method: parse).
 # Other ${VAR} placeholders stay unresolved in the published chart and are substituted at deploy time.
 charts:
