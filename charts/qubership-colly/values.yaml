@@ -9,10 +9,10 @@ colly:
     serviceName: envgene-inventory-service
     projectRepoUrl: ${PROJECT_GIT_REPO_URL_EXAMPLE}
     projectRepoGitToken: ${GH_TOKEN_EXAMPLE}
-    gitTokens: [ ]
-    # gitTokens:
-    #   - region: cn
-    #     token: ghp_token_for_cn
+    # gitTokens: [ ]
+    gitTokens:
+       - region: cn
+         token: ${GH_TOKEN_EXAMPLE}
     #   - region: mb
     #     token: ghp_token_for_mb
     cronSchedule: 0 0/2 * * * ?
