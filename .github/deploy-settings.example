@@ -2,13 +2,17 @@
 # Settings → Secrets and variables → Actions
 #
 # ── Deploy Colly workflow inputs ─────────────────────────────────────────────
-# chart-source: oci (default) | artifact
+# chart-source: release (default) | oci | artifact
+#   release   — GitHub pre-release dev-0.0.0-<run> (visible on repo home → Releases)
 #   oci       — helm pull from ghcr.io/<owner>/colly-stack/qubership-colly
-#   artifact  — download from a successful Build workflow run (requires upload-helm-tarball)
-# artifact-type (when chart-source=artifact):
-#   chart-package  — released-charts (.tgz), same content as OCI package
-#   charts-archive — helm-charts-<version> (helm-charts.tar.gz source tree)
+#   artifact  — workflow artifacts from a Build run (shorter retention)
+# artifact-type (when chart-source=release or artifact):
+#   chart-package  — packaged .tgz (recommended)
+#   charts-archive — helm-charts-<version>.tar.gz source tree
 # chart-version: latest or 0.0.0-<run_number> (Build workflow run number)
+#
+# Dev tar.gz storage (fork, upload-helm-tarball on):
+#   https://github.com/<owner>/<repo>/releases — pre-releases tagged dev-0.0.0-<run>
 #
 # ── Secrets (substituted at deploy time only) ────────────────────────────────
 # Names must match ${...} placeholders in charts/qubership-colly/values.yaml

@@ -10,19 +10,20 @@ on:
         required: true
         type: choice
         options:
+          - release
           - oci
           - artifact
-        default: oci
+        default: release
       chart-version:
         description: >-
           Chart version from Build workflow (Publish Helm Chart summary).
           Use latest (recommended) or 0.0.0-<run_number> (matches Build workflow run number).
-          For artifact source, also selects helm-charts-<version> when using charts-archive.
+          For release source, maps to GitHub pre-release tag dev-0.0.0-<run_number>.
         required: true
         type: string
         default: latest
       artifact-type:
-        description: 'Artifact to download when chart-source=artifact'
+        description: 'Asset to use when chart-source=release or artifact'
         required: true
         type: choice
         options:
@@ -136,8 +137,11 @@ jobs:
             echo "- Chart source: \`${CHART_SOURCE}\`"
             if [ "${CHART_SOURCE}" = "oci" ]; then
               echo "- Chart: \`${chart_ref}\`"
+            elif [ "${CHART_SOURCE}" = "release" ]; then
+              echo "- GitHub Release tag: \`dev-<version>\` (pre-release, visible on repo home → Releases)"
+              echo "- Asset type: \`${ARTIFACT_TYPE}\`"
             else
-              echo "- Artifact type: \`${ARTIFACT_TYPE}\`"
+              echo "- Workflow artifact type: \`${ARTIFACT_TYPE}\`"
               if [ "${ARTIFACT_TYPE}" = "chart-package" ]; then
                 echo "- Artifact name: \`released-charts\` (packaged \`.tgz\`)"
               else
@@ -188,6 +192,26 @@ jobs:
               exit 1
             fi
             echo "Latest OCI chart version: ${resolve_chart_version}"
+          fi
+
+          if [ "${CHART_SOURCE}" = "release" ]; then
+            if [ "${resolve_chart_version}" = "latest" ]; then
+              release_tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 50 \
+                --json tagName --jq '[.[] | select(.tagName | startswith("dev-"))][0].tagName')"
+              if [ -z "${release_tag}" ] || [ "${release_tag}" = "null" ]; then
+                echo "::error::No dev pre-releases found. Run Build with upload-helm-tarball on a fork first."
+                exit 1
+              fi
+              resolve_chart_version="${release_tag#dev-}"
+              echo "Latest dev release: ${release_tag}"
+            else
+              release_tag="dev-${resolve_chart_version}"
+            fi
+            if ! gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "::error::GitHub Release ${release_tag} not found (https://github.com/${GITHUB_REPOSITORY}/releases)"
+              exit 1
+            fi
+            echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           fi
 
           if [ "${CHART_SOURCE}" = "artifact" ]; then
@@ -242,6 +266,18 @@ jobs:
           echo "chart_path=${chart_dir}/qubership-colly" >> "$GITHUB_OUTPUT"
           echo "CHART_PATH=${chart_dir}/qubership-colly" >> "$GITHUB_ENV"
 
+      - name: Download chart assets from GitHub Release
+        if: github.event.inputs.chart-source == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.chart_resolve.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir ./chart-artifact
+
       - name: Download packaged chart artifact (released-charts)
         if: github.event.inputs.chart-source == 'artifact' && github.event.inputs.artifact-type == 'chart-package'
         uses: actions/download-artifact@v4
@@ -262,11 +298,12 @@ jobs:
           name: helm-charts-${{ steps.chart_resolve.outputs.resolve_chart_version }}
           path: ./chart-artifact
 
-      - name: Extract chart from artifact
-        if: github.event.inputs.chart-source == 'artifact'
+      - name: Extract chart from downloaded assets
+        if: github.event.inputs.chart-source == 'release' || github.event.inputs.chart-source == 'artifact'
         shell: bash
         env:
           ARTIFACT_TYPE: ${{ github.event.inputs.artifact-type }}
+          CHART_SOURCE: ${{ github.event.inputs.chart-source }}
         run: |
           set -euo pipefail
           chart_dir="$(mktemp -d)"
@@ -274,17 +311,18 @@ jobs:
             shopt -s nullglob
             packages=(./chart-artifact/*.tgz)
             if [ "${#packages[@]}" -eq 0 ]; then
-              echo "::error::No .tgz found in released-charts artifact (was upload-helm-tarball enabled in Build?)"
+              echo "::error::No .tgz found (was upload-helm-tarball enabled in Build?)"
               exit 1
             fi
             tar -xzf "${packages[0]}" -C "${chart_dir}"
           else
-            archive="./chart-artifact/helm-charts.tar.gz"
-            if [ ! -f "${archive}" ]; then
-              echo "::error::helm-charts.tar.gz not found in artifact (was upload-helm-tarball enabled in Build?)"
+            shopt -s nullglob
+            archives=(./chart-artifact/helm-charts*.tar.gz)
+            if [ "${#archives[@]}" -eq 0 ]; then
+              echo "::error::No helm-charts*.tar.gz found (was upload-helm-tarball enabled in Build?)"
               exit 1
             fi
-            tar -xzf "${archive}" -C "${chart_dir}"
+            tar -xzf "${archives[0]}" -C "${chart_dir}"
           fi
           if [ ! -d "${chart_dir}/qubership-colly" ]; then
             echo "::error::Extracted chart directory qubership-colly not found"
