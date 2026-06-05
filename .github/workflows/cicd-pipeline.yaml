@@ -10,7 +10,17 @@ on:
         required: false
         default: ''
       dry-run:
-        description: 'Skip pushing images and Helm charts (fork only; upstream never publishes from this workflow)'
+        description: 'Skip pushing Docker images and Helm chart to GHCR (fork only; upstream never publishes from this workflow)'
+        required: false
+        default: true
+        type: boolean
+      publish-helm-oci:
+        description: 'Push packaged Helm chart to GHCR (OCI). Fork only; ignored on upstream.'
+        required: false
+        default: true
+        type: boolean
+      upload-helm-tarball:
+        description: 'Package Helm chart and upload .tgz plus charts source archive (helm-charts.tar.gz) as workflow artifacts'
         required: false
         default: true
         type: boolean
@@ -94,8 +104,10 @@ jobs:
             echo "## Container publish mode"
             if [ "${{ github.event.repository.fork }}" = "true" ]; then
               echo "Fork repository: on \`main\` images use \`latest\` and \`main\`; other branches use \`<branch>_v<N>\` (+ \`dev\`) when dry-run is off."
-              echo "Helm chart publishes to \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when dry-run is off."
-              echo "Manual run: disable **dry-run** to push; push events publish automatically."
+              echo "Helm chart OCI: \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when **publish-helm-oci** is on and dry-run is off."
+              echo "Helm tarballs: \`released-charts\` (.tgz) and \`helm-charts-<version>\` (source \`helm-charts.tar.gz\`) when **upload-helm-tarball** is on."
+              echo "Manual run: disable **dry-run** to push images; use **publish-helm-oci** / **upload-helm-tarball** independently."
+              echo "Push events on a fork publish OCI and tarballs by default."
               echo "Deploy: run workflow **Deploy Colly** with \`chart-version: latest\`."
             else
               echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
@@ -190,6 +202,44 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Resolve Helm publish options
+        id: helm_opts
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_oci=false
+          upload_tarball=false
+          is_fork="${{ github.event.repository.fork }}"
+          is_dispatch="${{ github.event_name == 'workflow_dispatch' }}"
+          dry_run="${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}"
+
+          if [ "$is_fork" = "true" ]; then
+            if [ "$is_dispatch" = "true" ]; then
+              [ "${{ inputs.publish-helm-oci }}" = "true" ] && publish_oci=true
+              [ "${{ inputs.upload-helm-tarball }}" = "true" ] && upload_tarball=true
+            else
+              publish_oci=true
+              upload_tarball=true
+            fi
+          elif [ "$is_dispatch" = "true" ]; then
+            [ "${{ inputs.upload-helm-tarball }}" = "true" ] && upload_tarball=true
+          fi
+
+          if [ "$dry_run" = "true" ]; then
+            publish_oci=false
+          fi
+
+          package_charts=false
+          if [ "$publish_oci" = "true" ] || [ "$upload_tarball" = "true" ]; then
+            package_charts=true
+          fi
+
+          {
+            echo "publish_oci=${publish_oci}"
+            echo "upload_tarball=${upload_tarball}"
+            echo "package_charts=${package_charts}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Set chart version
         id: chart_version
         shell: bash
@@ -197,6 +247,7 @@ jobs:
 
       - name: Update chart values and publish
         id: update_chart
+        if: steps.helm_opts.outputs.package_charts == 'true'
         uses: netcracker/qubership-workflow-hub/actions/charts-values-update-action@v2.1.2
         with:
           release-version: ${{ needs.prepare-metadata.outputs.image_tag }}
@@ -211,8 +262,24 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
 
+      - name: Create Helm charts source archive (tar.gz)
+        if: steps.helm_opts.outputs.upload_tarball == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf dist/helm-charts.tar.gz -C charts .
+
+      - name: Upload Helm charts source archive (tar.gz)
+        if: steps.helm_opts.outputs.upload_tarball == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-charts-${{ steps.chart_version.outputs.value }}
+          path: dist/helm-charts.tar.gz
+          retention-days: 30
+
       - name: Publish helm chart package to GHCR
-        if: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+        if: steps.helm_opts.outputs.publish_oci == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -227,7 +294,9 @@ jobs:
       - name: Helm publish summary
         shell: bash
         env:
-          PUBLISH_CHARTS: ${{ github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+          PUBLISH_OCI: ${{ steps.helm_opts.outputs.publish_oci }}
+          UPLOAD_TARBALL: ${{ steps.helm_opts.outputs.upload_tarball }}
+          PACKAGE_CHARTS: ${{ steps.helm_opts.outputs.package_charts }}
           HELM_PACKAGE: ${{ env.HELM_PACKAGE_NAME }}
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
@@ -237,13 +306,26 @@ jobs:
             echo "- GHCR package: \`${HELM_PACKAGE}\`"
             echo "- Image tag in values: \`${{ needs.prepare-metadata.outputs.image_tag }}\`"
             echo "- Chart version (SemVer in package): \`${{ steps.chart_version.outputs.value }}\`"
-            if [ "${PUBLISH_CHARTS}" = "true" ]; then
-              echo "- OCI: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
-              echo "- **Deploy Colly** inputs for this build:"
-              echo "  - \`chart-version\`: \`latest\` (resolves newest \`0.0.0-*\` in GHCR) or \`${{ steps.chart_version.outputs.value }}\`"
-              echo "  - \`image-tag\`: \`${{ needs.prepare-metadata.outputs.image_tag }}\` (optional override; chart already references this tag)"
+            if [ "${PACKAGE_CHARTS}" != "true" ]; then
+              echo "- Helm packaging skipped (**publish-helm-oci** and **upload-helm-tarball** are both off)."
             else
-              echo "- Chart packaged locally (publish skipped: dry-run or upstream)."
+              if [ "${PUBLISH_OCI}" = "true" ]; then
+                echo "- OCI: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
+                echo "- **Deploy Colly** (chart-source: \`oci\`):"
+                echo "  - \`chart-version\`: \`latest\` or \`${{ steps.chart_version.outputs.value }}\`"
+              else
+                echo "- OCI publish skipped (dry-run or **publish-helm-oci** off)."
+              fi
+              if [ "${UPLOAD_TARBALL}" = "true" ]; then
+                echo "- Artifacts:"
+                echo "  - \`released-charts\` — packaged chart \`.tgz\`"
+                echo "  - \`helm-charts-${{ steps.chart_version.outputs.value }}\` — source tree \`helm-charts.tar.gz\`"
+                echo "- **Deploy Colly** (chart-source: \`artifact\`, upload-helm-tarball was on):"
+                echo "  - \`chart-version\`: \`${{ steps.chart_version.outputs.value }}\` or \`latest\`"
+                echo "  - \`artifact-type\`: \`chart-package\` (recommended) or \`charts-archive\`"
+              else
+                echo "- Tarball artifacts skipped (**upload-helm-tarball** off)."
+              fi
+              echo "- \`image-tag\` (Deploy Colly, optional): \`${{ needs.prepare-metadata.outputs.image_tag }}\`"
             fi
-            echo "- Artifact: \`released-charts\` (packaged .tgz from this job)"
           } >> "$GITHUB_STEP_SUMMARY"
