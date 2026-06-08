@@ -1,2 +1,11 @@
 apiVersion: v1
-entries: {}
+entries:
+  qubership-colly:
+  - apiVersion: v2
+    created: "2026-06-08T08:27:33.5680195Z"
+    digest: 285f54b2dc089e02e20245a7b3ed3a93c7e7c989221f7a68a05b9ceb8d0d5e41
+    name: qubership-colly
+    urls:
+    - https://github.com/andyroode/qubership-colly/releases/download/v1.0.0/qubership-colly-1.0.0.tgz
+    version: 1.0.0
+generated: "2026-06-08T08:27:33.568025141Z"
