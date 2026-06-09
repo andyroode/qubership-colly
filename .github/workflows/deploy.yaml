@@ -10,15 +10,15 @@ on:
         required: true
         type: choice
         options:
+          - helm-repo
           - release
-          - oci
           - artifact
-        default: release
+        default: helm-repo
       chart-version:
         description: >-
-          Chart version from Build workflow (Publish Helm Chart summary).
-          Use latest (recommended) or 0.0.0-<run_number> (matches Build workflow run number).
-          For release source, maps to GitHub pre-release tag dev-0.0.0-<run_number>.
+          Dev chart version from Build workflow (Publish Helm Chart summary).
+          Use latest (recommended) or 0.0.0-<docker-tag> (e.g. 0.0.0-feature-checking-build, 0.0.0-latest on main).
+          For release source, maps to GitHub tag dev-0.0.0-<docker-tag>.
         required: true
         type: string
         default: latest
@@ -44,7 +44,6 @@ on:
         type: boolean
 
 env:
-  HELM_PACKAGE_NAME: colly-stack
   COLLY_EKS_CLUSTER: Qubership-pioneer
   COLLY_INSTALL_NAMESPACE: qubership-colly-test
 
@@ -127,18 +126,19 @@ jobs:
           ARTIFACT_TYPE: ${{ github.event.inputs.artifact-type }}
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          chart_ref="oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
+          repo="${{ github.event.repository.name }}"
+          helm_repo_url="https://${owner}.github.io/${repo}/"
           echo "owner=${owner}" >> "$GITHUB_OUTPUT"
-          echo "chart_ref=${chart_ref}" >> "$GITHUB_OUTPUT"
+          echo "helm_repo_url=${helm_repo_url}" >> "$GITHUB_OUTPUT"
           echo "chart_source=${CHART_SOURCE}" >> "$GITHUB_OUTPUT"
           echo "artifact_type=${ARTIFACT_TYPE}" >> "$GITHUB_OUTPUT"
           {
             echo "## Deploy parameters"
             echo "- Chart source: \`${CHART_SOURCE}\`"
-            if [ "${CHART_SOURCE}" = "oci" ]; then
-              echo "- Chart: \`${chart_ref}\`"
+            if [ "${CHART_SOURCE}" = "helm-repo" ]; then
+              echo "- Helm repo: \`${helm_repo_url}\`"
             elif [ "${CHART_SOURCE}" = "release" ]; then
-              echo "- GitHub Release tag: \`dev-<version>\` (pre-release, visible on repo home → Releases)"
+              echo "- GitHub Release tag: \`dev-<version>\` (pre-release)"
               echo "- Asset type: \`${ARTIFACT_TYPE}\`"
             else
               echo "- Workflow artifact type: \`${ARTIFACT_TYPE}\`"
@@ -173,40 +173,22 @@ jobs:
         run: |
           set -euo pipefail
           resolve_chart_version="${CHART_VERSION}"
-          workflow_file="cicd-pipeline.yaml"
 
-          if [ "${CHART_SOURCE}" = "oci" ] && [ "${resolve_chart_version}" = "latest" ]; then
-            owner="${GITHUB_REPOSITORY_OWNER,,}"
-            repo_path="${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
-            echo "Resolving latest chart version from GHCR tags (helm requires SemVer, not latest)"
-            ghcr_token="$(curl -fsSL -u "${{ github.actor }}:${GH_TOKEN}" \
-              "https://ghcr.io/token?scope=repository:${repo_path}:pull" | jq -r '.token')"
-            tags="$(curl -fsSL -H "Authorization: Bearer ${ghcr_token}" \
-              "https://ghcr.io/v2/${repo_path}/tags/list" | jq -r '.tags[]? // empty')"
-            resolve_chart_version="$(echo "${tags}" | grep -E '^0\.0\.0-[0-9]+$' | sort -t'-' -k2 -n | tail -1)"
-            if [ -z "${resolve_chart_version}" ]; then
-              resolve_chart_version="$(echo "${tags}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)"
-            fi
-            if [ -z "${resolve_chart_version}" ]; then
-              echo "::error::No chart version tags found in ghcr.io/${repo_path}"
-              exit 1
-            fi
-            echo "Latest OCI chart version: ${resolve_chart_version}"
-          fi
-
-          if [ "${CHART_SOURCE}" = "release" ]; then
+          if [ "${CHART_SOURCE}" = "helm-repo" ] || [ "${CHART_SOURCE}" = "release" ] || [ "${CHART_SOURCE}" = "artifact" ]; then
             if [ "${resolve_chart_version}" = "latest" ]; then
               release_tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 50 \
                 --json tagName --jq '[.[] | select(.tagName | startswith("dev-"))][0].tagName')"
               if [ -z "${release_tag}" ] || [ "${release_tag}" = "null" ]; then
-                echo "::error::No dev pre-releases found. Run Build with upload-helm-tarball on a fork first."
+                echo "::error::No dev releases found. Run Build with publish-helm-chart on a fork first."
                 exit 1
               fi
               resolve_chart_version="${release_tag#dev-}"
-              echo "Latest dev release: ${release_tag}"
-            else
-              release_tag="dev-${resolve_chart_version}"
+              echo "Latest dev chart version: ${resolve_chart_version} (from ${release_tag})"
             fi
+          fi
+
+          if [ "${CHART_SOURCE}" = "release" ]; then
+            release_tag="dev-${resolve_chart_version}"
             if ! gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
               echo "::error::GitHub Release ${release_tag} not found (https://github.com/${GITHUB_REPOSITORY}/releases)"
               exit 1
@@ -215,55 +197,39 @@ jobs:
           fi
 
           if [ "${CHART_SOURCE}" = "artifact" ]; then
-            if [ "${resolve_chart_version}" = "latest" ]; then
+            artifact_name="helm-charts-${resolve_chart_version}"
+            run_id="$(gh api \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100&name=${artifact_name}" \
+              --jq '.artifacts | map(select(.expired == false)) | sort_by(.created_at) | reverse | .[0].workflow_run.id // empty')"
+            if [ -z "${run_id}" ]; then
               run_id="$(gh api \
-                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?status=success&per_page=1" \
-                --jq '.workflow_runs[0].id')"
-              run_number="$(gh api \
-                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?status=success&per_page=1" \
-                --jq '.workflow_runs[0].run_number')"
-              if [ -z "${run_id}" ] || [ "${run_id}" = "null" ]; then
-                echo "::error::No successful Build workflow runs found for artifact download"
-                exit 1
-              fi
-              resolve_chart_version="0.0.0-${run_number}"
-              echo "Latest Build run: id=${run_id}, chart version=${resolve_chart_version}"
-            else
-              run_number="${resolve_chart_version#0.0.0-}"
-              if [ "${run_number}" = "${resolve_chart_version}" ] || ! [[ "${run_number}" =~ ^[0-9]+$ ]]; then
-                echo "::error::Artifact source requires chart-version latest or 0.0.0-<run_number>"
-                exit 1
-              fi
-              run_id="$(gh api \
-                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?status=success&per_page=100" \
-                --jq ".workflow_runs[] | select(.run_number==${run_number}) | .id" | head -1)"
-              if [ -z "${run_id}" ]; then
-                echo "::error::No successful Build workflow run with run_number=${run_number}"
-                exit 1
-              fi
-              echo "Resolved Build run id=${run_id} for chart version ${resolve_chart_version}"
+                "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+                --jq --arg name "released-charts" \
+                '[.artifacts[] | select(.name == $name and .expired == false)] | sort_by(.created_at) | reverse | .[0].workflow_run.id // empty')"
             fi
+            if [ -z "${run_id}" ]; then
+              echo "::error::No workflow artifacts found for chart version ${resolve_chart_version}"
+              exit 1
+            fi
+            echo "Resolved Build run id=${run_id} for chart version ${resolve_chart_version}"
             echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
           fi
 
           echo "resolve_chart_version=${resolve_chart_version}" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch chart from GHCR (OCI)
-        if: github.event.inputs.chart-source == 'oci'
-        id: fetch_oci
+      - name: Fetch chart from Helm repo (gh-pages)
+        if: github.event.inputs.chart-source == 'helm-repo'
         shell: bash
         env:
-          CHART_REF: ${{ steps.params.outputs.chart_ref }}
+          HELM_REPO_URL: ${{ steps.params.outputs.helm_repo_url }}
           RESOLVE_CHART_VERSION: ${{ steps.chart_resolve.outputs.resolve_chart_version }}
         run: |
           set -euo pipefail
           chart_dir="$(mktemp -d)"
-          echo "Pulling ${CHART_REF} version ${RESOLVE_CHART_VERSION}"
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
-            -u "${{ github.actor }}" --password-stdin
-          helm pull "${CHART_REF}" --version "${RESOLVE_CHART_VERSION}" --untar -d "${chart_dir}"
-          helm registry logout ghcr.io
-          echo "chart_path=${chart_dir}/qubership-colly" >> "$GITHUB_OUTPUT"
+          helm repo add colly "${HELM_REPO_URL}"
+          helm repo update
+          echo "Pulling qubership-colly version ${RESOLVE_CHART_VERSION} from ${HELM_REPO_URL}"
+          helm pull colly/qubership-colly --version "${RESOLVE_CHART_VERSION}" --untar -d "${chart_dir}"
           echo "CHART_PATH=${chart_dir}/qubership-colly" >> "$GITHUB_ENV"
 
       - name: Download chart assets from GitHub Release
@@ -311,7 +277,7 @@ jobs:
             shopt -s nullglob
             packages=(./chart-artifact/*.tgz)
             if [ "${#packages[@]}" -eq 0 ]; then
-              echo "::error::No .tgz found (was upload-helm-tarball enabled in Build?)"
+              echo "::error::No .tgz found (was upload-helm-artifacts enabled in Build?)"
               exit 1
             fi
             tar -xzf "${packages[0]}" -C "${chart_dir}"
@@ -319,7 +285,7 @@ jobs:
             shopt -s nullglob
             archives=(./chart-artifact/helm-charts*.tar.gz)
             if [ "${#archives[@]}" -eq 0 ]; then
-              echo "::error::No helm-charts*.tar.gz found (was upload-helm-tarball enabled in Build?)"
+              echo "::error::No helm-charts*.tar.gz found (was upload-helm-artifacts enabled in Build?)"
               exit 1
             fi
             tar -xzf "${archives[0]}" -C "${chart_dir}"

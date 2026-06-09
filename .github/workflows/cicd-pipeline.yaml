@@ -1,4 +1,4 @@
-# Fork-only publish: images and Helm charts are pushed to ghcr.io/<fork-owner>/... on push to a fork.
+# Fork-only publish: Docker images to ghcr.io/<fork-owner>/...; dev Helm charts to gh-pages (chart-releaser).
 # Upstream (Netcracker/qubership-colly) always builds in dry-run and never publishes from this workflow.
 name: "Build"
 
@@ -10,27 +10,23 @@ on:
         required: false
         default: ''
       dry-run:
-        description: 'Skip pushing Docker images and Helm chart to GHCR (fork only; upstream never publishes from this workflow)'
+        description: 'Skip pushing Docker images and dev Helm chart (fork only; upstream never publishes from this workflow)'
         required: false
         default: true
         type: boolean
-      publish-helm-oci:
-        description: 'Push packaged Helm chart to GHCR (OCI). Fork only; ignored on upstream.'
-        required: false
-        default: true
-        type: boolean
-      upload-helm-tarball:
+      publish-helm-chart:
         description: >-
-          Package Helm chart; publish pre-release on GitHub Releases (visible on repo home page, fork only)
-          and upload workflow artifacts (.tgz + helm-charts.tar.gz)
+          Publish dev Helm chart to gh-pages and GitHub Release (tag dev-0.0.0-<docker-tag>).
+          Fork only; ignored on upstream.
+        required: false
+        default: true
+        type: boolean
+      upload-helm-artifacts:
+        description: 'Upload packaged chart (.tgz) and charts source archive as workflow artifacts'
         required: false
         default: true
         type: boolean
   push:
-
-env:
-  # GHCR OCI package path (chart name in repo stays qubership-colly)
-  HELM_PACKAGE_NAME: colly-stack
 
 permissions:
   contents: read
@@ -105,13 +101,13 @@ jobs:
           {
             echo "## Container publish mode"
             if [ "${{ github.event.repository.fork }}" = "true" ]; then
-              echo "Fork repository: on \`main\` images use \`latest\` and \`main\`; other branches use \`<branch-with-hyphens>\` (no version increment) when dry-run is off."
-              echo "Helm chart OCI: \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when **publish-helm-oci** is on and dry-run is off."
-              echo "Helm tarballs: GitHub **Releases** (pre-release \`dev-0.0.0-<run>\`, visible on repo home) + workflow artifacts when **upload-helm-tarball** is on."
-              echo "Manual run: disable **dry-run** to push images; use **publish-helm-oci** / **upload-helm-tarball** independently."
-              echo "Push events on a fork publish OCI and tarballs by default."
-              echo "Chart values: \`values.yaml\` image tags are updated and **committed to the current branch** (with \`[skip ci]\` to avoid rebuild loops)."
-              echo "Deploy: run workflow **Deploy Colly** with \`chart-version: latest\`."
+              echo "Fork repository: on \`main\` images use \`latest\` and \`main\`; other branches use \`<branch-with-hyphens>\` when dry-run is off."
+              echo "Dev Helm chart: version \`0.0.0-<docker-tag>\`, GitHub Release \`dev-0.0.0-<docker-tag>\`, index on **gh-pages** when **publish-helm-chart** is on."
+              echo "Helm repo: \`helm repo add colly https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/\`"
+              echo "Manual run: disable **dry-run** to push images; toggle **publish-helm-chart** / **upload-helm-artifacts** independently."
+              echo "Push events on a fork publish charts to gh-pages by default."
+              echo "Chart values: \`values.yaml\` image tags are **committed to the current branch** (\`[skip ci]\`)."
+              echo "Deploy: **Deploy Colly** with \`chart-source: helm-repo\` and \`chart-version: latest\` or \`0.0.0-<docker-tag>\`."
             else
               echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
             fi
@@ -198,56 +194,56 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           ref: ${{ github.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Resolve Helm publish options
         id: helm_opts
         shell: bash
         run: |
           set -euo pipefail
-          publish_oci=false
-          upload_tarball=false
+          publish_helm=false
+          upload_artifacts=false
           is_fork="${{ github.event.repository.fork }}"
           is_dispatch="${{ github.event_name == 'workflow_dispatch' }}"
           dry_run="${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}"
 
           if [ "$is_fork" = "true" ]; then
             if [ "$is_dispatch" = "true" ]; then
-              [ "${{ inputs.publish-helm-oci }}" = "true" ] && publish_oci=true
-              [ "${{ inputs.upload-helm-tarball }}" = "true" ] && upload_tarball=true
+              [ "${{ inputs.publish-helm-chart }}" = "true" ] && publish_helm=true
+              [ "${{ inputs.upload-helm-artifacts }}" = "true" ] && upload_artifacts=true
             else
-              publish_oci=true
-              upload_tarball=true
+              publish_helm=true
+              upload_artifacts=true
             fi
           elif [ "$is_dispatch" = "true" ]; then
-            [ "${{ inputs.upload-helm-tarball }}" = "true" ] && upload_tarball=true
+            [ "${{ inputs.upload-helm-artifacts }}" = "true" ] && upload_artifacts=true
           fi
 
           if [ "$dry_run" = "true" ]; then
-            publish_oci=false
+            publish_helm=false
           fi
 
           package_charts=false
-          if [ "$publish_oci" = "true" ] || [ "$upload_tarball" = "true" ]; then
+          if [ "$publish_helm" = "true" ] || [ "$upload_artifacts" = "true" ]; then
             package_charts=true
           fi
 
           {
-            echo "publish_oci=${publish_oci}"
-            echo "upload_tarball=${upload_tarball}"
+            echo "publish_helm=${publish_helm}"
+            echo "upload_artifacts=${upload_artifacts}"
             echo "package_charts=${package_charts}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set chart version
         id: chart_version
         shell: bash
-        run: echo "value=0.0.0-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+        run: echo "value=0.0.0-${{ needs.prepare-metadata.outputs.image_tag }}" >> "$GITHUB_OUTPUT"
 
       - name: Update chart values and publish
         id: update_chart
@@ -266,14 +262,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
 
-      - name: Sync chart image tags to workspace
-        if: steps.helm_opts.outputs.package_charts == 'true'
-        shell: bash
-        env:
-          IMAGE_TAG: ${{ needs.prepare-metadata.outputs.image_tag }}
-        run: bash "${GITHUB_WORKSPACE}/.github/scripts/update-chart-image-tags.sh"
-
-      - name: Commit updated chart values to branch
+      - name: Sync chart image tags and commit to branch
         if: >-
           steps.helm_opts.outputs.package_charts == 'true'
           && github.event.repository.fork == true
@@ -284,139 +273,108 @@ jobs:
         run: |
           set -euo pipefail
           values_file="charts/qubership-colly/values.yaml"
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+
+          python3 - "${owner}" "${IMAGE_TAG}" "${values_file}" <<'PY'
+          import re, sys
+          owner, tag, path = sys.argv[1:4]
+          text = open(path, encoding="utf-8").read()
+          for svc in ("envgene-inventory-service", "environment-operational-service", "ui-service"):
+              text = re.sub(
+                  rf"(image:\s*ghcr\.io/)[^/]+/{re.escape(svc)}:[^\s]*",
+                  rf"\g<1>{owner}/{svc}:{tag}",
+                  text,
+              )
+          open(path, "w", encoding="utf-8").write(text)
+          PY
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           if git diff --quiet -- "${values_file}"; then
-            echo "::warning::No changes in ${values_file} after sync — check image lines match ghcr.io/<owner>/<service>:<tag>"
+            echo "::warning::No changes in ${values_file} after sync"
             exit 0
           fi
 
           git add "${values_file}"
-          git commit -m "$(cat <<EOF
-          ci: update image tags to ${IMAGE_TAG} [skip ci]
-          EOF
-          )"
+          git commit -m "ci: update image tags to ${IMAGE_TAG} [skip ci]"
           git push origin "HEAD:${GITHUB_REF_NAME}"
-          echo "Committed and pushed ${values_file} to ${GITHUB_REF_NAME}"
+
+      - name: Publish dev chart to gh-pages
+        id: chart_releaser
+        if: steps.helm_opts.outputs.publish_helm == 'true' && github.event.repository.fork == true
+        uses: netcracker/chart-releaser-action@main
+        with:
+          release_name_template: "dev-{{ .Version }}"
+          mark_as_latest: false
+          skip_existing: true
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Create Helm charts source archive (tar.gz)
-        if: steps.helm_opts.outputs.upload_tarball == 'true'
+        if: steps.helm_opts.outputs.upload_artifacts == 'true'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
           tar -czf dist/helm-charts.tar.gz -C charts .
 
+      - name: Upload packaged chart artifact
+        if: steps.helm_opts.outputs.upload_artifacts == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: released-charts
+          path: .cr-release-packages/*.tgz
+          retention-days: 30
+
       - name: Upload Helm charts source archive (tar.gz)
-        if: steps.helm_opts.outputs.upload_tarball == 'true'
+        if: steps.helm_opts.outputs.upload_artifacts == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: helm-charts-${{ steps.chart_version.outputs.value }}
           path: dist/helm-charts.tar.gz
           retention-days: 30
 
-      - name: Publish Helm charts to GitHub Release
-        if: steps.helm_opts.outputs.upload_tarball == 'true' && github.event.repository.fork == true
-        id: github_release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CHART_VERSION: ${{ steps.chart_version.outputs.value }}
-          IMAGE_TAG: ${{ needs.prepare-metadata.outputs.image_tag }}
-        run: |
-          set -euo pipefail
-          release_tag="dev-${CHART_VERSION}"
-          release_dir="release-assets"
-          mkdir -p "${release_dir}"
-          shopt -s nullglob
-          packages=(.cr-release-packages/*.tgz)
-          if [ "${#packages[@]}" -eq 0 ]; then
-            echo "::error::No packaged chart .tgz found for GitHub Release"
-            exit 1
-          fi
-          cp "${packages[0]}" "${release_dir}/"
-          cp dist/helm-charts.tar.gz "${release_dir}/helm-charts-${CHART_VERSION}.tar.gz"
-          notes_file="$(mktemp)"
-          {
-            echo "Dev Helm chart build from workflow run #${GITHUB_RUN_NUMBER}."
-            echo ""
-            echo "- Chart version: \`${CHART_VERSION}\`"
-            echo "- Image tag in values: \`${IMAGE_TAG}\`"
-            echo "- Branch: \`${GITHUB_REF_NAME}\`"
-            echo "- Commit: \`${GITHUB_SHA}\`"
-            echo ""
-            echo "**Assets**"
-            echo "- Packaged chart (\`.tgz\`) — same as OCI package"
-            echo "- \`helm-charts-${CHART_VERSION}.tar.gz\` — charts source tree"
-            echo ""
-            echo "**Deploy Colly**: \`chart-source: release\`, \`chart-version: ${CHART_VERSION}\` or \`latest\`"
-          } > "${notes_file}"
-          gh release create "${release_tag}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "Dev build ${CHART_VERSION}" \
-            --notes-file "${notes_file}" \
-            --prerelease \
-            "${release_dir}/"*
-          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${release_tag}"
-          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
-          echo "release_url=${release_url}" >> "$GITHUB_OUTPUT"
-          echo "Published pre-release: ${release_url}"
-
-      - name: Publish helm chart package to GHCR
-        if: steps.helm_opts.outputs.publish_oci == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
-            -u "${{ github.actor }}" --password-stdin
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          for chart in "${GITHUB_WORKSPACE}/.cr-release-packages/"*.tgz; do
-            helm push "${chart}" "oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}"
-          done
-          helm registry logout ghcr.io
-
       - name: Helm publish summary
         shell: bash
         env:
-          PUBLISH_OCI: ${{ steps.helm_opts.outputs.publish_oci }}
-          UPLOAD_TARBALL: ${{ steps.helm_opts.outputs.upload_tarball }}
+          PUBLISH_HELM: ${{ steps.helm_opts.outputs.publish_helm }}
+          UPLOAD_ARTIFACTS: ${{ steps.helm_opts.outputs.upload_artifacts }}
           PACKAGE_CHARTS: ${{ steps.helm_opts.outputs.package_charts }}
-          HELM_PACKAGE: ${{ env.HELM_PACKAGE_NAME }}
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="${{ github.event.repository.name }}"
+          chart_version="${{ steps.chart_version.outputs.value }}"
+          release_tag="dev-${chart_version}"
           {
-            echo "## Helm chart"
-            echo "- Chart in repo: \`qubership-colly\` (unchanged)"
-            echo "- GHCR package: \`${HELM_PACKAGE}\`"
-            echo "- Image tag in values: \`${{ needs.prepare-metadata.outputs.image_tag }}\`"
-            echo "- Chart version (SemVer in package): \`${{ steps.chart_version.outputs.value }}\`"
+            echo "## Helm chart (dev)"
+            echo "- Chart: \`qubership-colly\`"
+            echo "- Docker image tag in values: \`${{ needs.prepare-metadata.outputs.image_tag }}\`"
+            echo "- Chart version: \`${chart_version}\`"
             if [ "${PACKAGE_CHARTS}" != "true" ]; then
-              echo "- Helm packaging skipped (**publish-helm-oci** and **upload-helm-tarball** are both off)."
+              echo "- Helm packaging skipped (**publish-helm-chart** and **upload-helm-artifacts** are both off)."
             else
-              if [ "${PUBLISH_OCI}" = "true" ]; then
-                echo "- OCI: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
-                echo "- **Deploy Colly** (chart-source: \`oci\`):"
-                echo "  - \`chart-version\`: \`latest\` or \`${{ steps.chart_version.outputs.value }}\`"
-              else
-                echo "- OCI publish skipped (dry-run or **publish-helm-oci** off)."
-              fi
-              if [ "${UPLOAD_TARBALL}" = "true" ]; then
-                if [ "${{ github.event.repository.fork }}" = "true" ]; then
-                  echo "- GitHub Release (repo home → Releases): \`${{ steps.github_release.outputs.release_url }}\`"
-                  echo "  - Tag: \`${{ steps.github_release.outputs.release_tag }}\`"
-                  echo "  - All dev builds: \`https://github.com/${GITHUB_REPOSITORY}/releases\`"
+              if [ "${PUBLISH_HELM}" = "true" ]; then
+                echo "- GitHub Release tag: \`${release_tag}\` (pre-release)"
+                echo "- gh-pages index: \`https://${owner}.github.io/${repo}/\`"
+                echo "- Install:"
+                echo "  \`helm repo add colly https://${owner}.github.io/${repo}/\`"
+                echo "  \`helm install colly colly/qubership-colly --version ${chart_version}\`"
+                echo "- **Deploy Colly** (recommended: \`chart-source: helm-repo\`):"
+                echo "  - \`chart-version\`: \`latest\` or \`${chart_version}\`"
+                if [ -n "${{ steps.chart_releaser.outputs.changed_charts }}" ]; then
+                  echo "- chart-releaser updated: \`${{ steps.chart_releaser.outputs.changed_charts }}\`"
                 fi
-                echo "- Workflow artifacts (90-day retention on public repos):"
-                echo "  - \`released-charts\` — packaged chart \`.tgz\`"
-                echo "  - \`helm-charts-${{ steps.chart_version.outputs.value }}\` — source tree \`helm-charts.tar.gz\`"
-                echo "- **Deploy Colly** (recommended: \`chart-source: release\`):"
-                echo "  - \`chart-version\`: \`${{ steps.chart_version.outputs.value }}\` or \`latest\`"
-                echo "  - \`artifact-type\`: \`chart-package\` (recommended) or \`charts-archive\`"
-                echo "- Or \`chart-source: artifact\` to pull from this workflow run's artifacts"
               else
-                echo "- Tarball artifacts skipped (**upload-helm-tarball** off)."
+                echo "- gh-pages publish skipped (dry-run or **publish-helm-chart** off)."
+              fi
+              if [ "${UPLOAD_ARTIFACTS}" = "true" ]; then
+                echo "- Workflow artifacts:"
+                echo "  - \`released-charts\` — packaged chart \`.tgz\`"
+                echo "  - \`helm-charts-${chart_version}\` — source \`helm-charts.tar.gz\`"
+                echo "- **Deploy Colly** (\`chart-source: release\` or \`artifact\`)"
+              else
+                echo "- Workflow artifacts skipped (**upload-helm-artifacts** off)."
               fi
               echo "- \`image-tag\` (Deploy Colly, optional): \`${{ needs.prepare-metadata.outputs.image_tag }}\`"
             fi
