@@ -8,4 +8,11 @@ entries:
     urls:
     - https://github.com/andyroode/qubership-colly/releases/download/v1.0.0/qubership-colly-1.0.0.tgz
     version: 1.0.0
-generated: "2026-06-08T08:27:33.568025141Z"
+  - apiVersion: v2
+    created: "2026-06-09T09:00:52.727344494Z"
+    digest: 64cfcefd7c61f08b5c1191b1a8e4fba85ace5c2b55b87c5c900d8624075d1538
+    name: qubership-colly
+    urls:
+    - https://github.com/andyroode/qubership-colly/releases/download/dev-0.0.0-feature-checking-build/qubership-colly-0.0.0-feature-checking-build.tgz
+    version: 0.0.0-feature-checking-build
+generated: "2026-06-09T09:00:52.727359937Z"
