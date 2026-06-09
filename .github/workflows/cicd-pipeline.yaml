@@ -266,6 +266,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
 
+      - name: Sync chart image tags to workspace
+        if: steps.helm_opts.outputs.package_charts == 'true'
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ needs.prepare-metadata.outputs.image_tag }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/update-chart-image-tags.sh"
+
       - name: Commit updated chart values to branch
         if: >-
           steps.helm_opts.outputs.package_charts == 'true'
@@ -282,7 +289,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           if git diff --quiet -- "${values_file}"; then
-            echo "No changes in ${values_file}, skipping commit"
+            echo "::warning::No changes in ${values_file} after sync — check image lines match ghcr.io/<owner>/<service>:<tag>"
             exit 0
           fi
 
