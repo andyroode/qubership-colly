@@ -83,12 +83,9 @@ jobs:
         id: calculate_image_tag
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXTRA_TAGS: ${{ github.event.inputs.tags }}
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/calculate-image-tag.sh"
 
   build:

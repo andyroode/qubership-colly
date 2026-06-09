@@ -105,11 +105,12 @@ jobs:
           {
             echo "## Container publish mode"
             if [ "${{ github.event.repository.fork }}" = "true" ]; then
-              echo "Fork repository: on \`main\` images use \`latest\` and \`main\`; other branches use \`<branch>_v<N>\` (+ \`dev\`) when dry-run is off."
+              echo "Fork repository: on \`main\` images use \`latest\` and \`main\`; other branches use \`<branch-with-hyphens>\` (no version increment) when dry-run is off."
               echo "Helm chart OCI: \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when **publish-helm-oci** is on and dry-run is off."
               echo "Helm tarballs: GitHub **Releases** (pre-release \`dev-0.0.0-<run>\`, visible on repo home) + workflow artifacts when **upload-helm-tarball** is on."
               echo "Manual run: disable **dry-run** to push images; use **publish-helm-oci** / **upload-helm-tarball** independently."
               echo "Push events on a fork publish OCI and tarballs by default."
+              echo "Chart values: \`values.yaml\` image tags are updated and **committed to the current branch** (with \`[skip ci]\` to avoid rebuild loops)."
               echo "Deploy: run workflow **Deploy Colly** with \`chart-version: latest\`."
             else
               echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
@@ -146,23 +147,21 @@ jobs:
         id: calculate_image_tag
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXTRA_TAGS: ${{ github.event.inputs.tags }}
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           bash "${GITHUB_WORKSPACE}/.github/scripts/calculate-image-tag.sh"
           {
             echo "### Docker image tags"
             if [ "${{ github.ref_name }}" = "main" ]; then
-              echo "- Branch: \`main\` (fixed tags, no increment)"
+              echo "- Branch: \`main\` (fixed tags)"
               echo "- Tags: \`latest\`, \`main\`"
               echo "- Helm values tag: \`latest\`"
             else
-              echo "- Primary tag: \`${{ steps.calculate_image_tag.outputs.value }}\`"
+              echo "- Branch tag (hyphens, no increment): \`${{ steps.calculate_image_tag.outputs.value }}\`"
               echo "- Tags for build: \`${{ steps.calculate_image_tag.outputs.tags }}\`"
+              echo "- Helm values tag: \`${{ steps.calculate_image_tag.outputs.value }}\`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -203,6 +202,9 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve Helm publish options
         id: helm_opts
@@ -263,6 +265,34 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
+
+      - name: Commit updated chart values to branch
+        if: >-
+          steps.helm_opts.outputs.package_charts == 'true'
+          && github.event.repository.fork == true
+          && !(github.event_name == 'workflow_dispatch' && inputs.dry-run)
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ needs.prepare-metadata.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          values_file="charts/qubership-colly/values.yaml"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- "${values_file}"; then
+            echo "No changes in ${values_file}, skipping commit"
+            exit 0
+          fi
+
+          git add "${values_file}"
+          git commit -m "$(cat <<EOF
+          ci: update image tags to ${IMAGE_TAG} [skip ci]
+          EOF
+          )"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "Committed and pushed ${values_file} to ${GITHUB_REF_NAME}"
 
       - name: Create Helm charts source archive (tar.gz)
         if: steps.helm_opts.outputs.upload_tarball == 'true'

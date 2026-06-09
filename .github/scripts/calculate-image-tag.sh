@@ -3,56 +3,36 @@
 set -euo pipefail
 
 normalize_ref() {
-  echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's|/|_|g' | sed 's|[^a-z0-9_.-]|_|g' | sed 's|_*$||'
+  echo "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's|/|-|g' \
+    | sed 's|_|-|g' \
+    | sed 's|[^a-z0-9.-]|-|g' \
+    | sed 's|-\+|-|g' \
+    | sed 's|^-||' \
+    | sed 's|-$||'
 }
 
 ref_name="${REF_NAME:?}"
 ref_type="${REF_TYPE:?}"
-owner="${GITHUB_REPOSITORY_OWNER,,}"
 
 if [ "${ref_name}" = "main" ]; then
   image_tag="latest"
   tags="latest, main"
 else
   if [ "${ref_type}" = "tag" ]; then
-    prefix=$(normalize_ref "${ref_name#v}")
+    image_tag=$(normalize_ref "${ref_name#v}")
   else
-    prefix=$(normalize_ref "${ref_name}")
+    image_tag=$(normalize_ref "${ref_name}")
   fi
 
-  max_prefix_len=120
-  if [ "${#prefix}" -gt "${max_prefix_len}" ]; then
-    prefix="${prefix:0:${max_prefix_len}}"
-    prefix="${prefix%%_}"
+  max_len=120
+  if [ "${#image_tag}" -gt "${max_len}" ]; then
+    image_tag="${image_tag:0:${max_len}}"
+    image_tag="${image_tag%%-}"
   fi
 
-  sample_image="envgene-inventory-service"
-  repo_path="${owner}/${sample_image}"
-  max_ver=0
-
-  if [ -n "${GH_TOKEN:-}" ]; then
-    ghcr_token="$(curl -fsSL -u "${GITHUB_ACTOR}:${GH_TOKEN}" \
-      "https://ghcr.io/token?scope=repository:${repo_path}:pull" 2>/dev/null | jq -r '.token // empty' || true)"
-    if [ -n "${ghcr_token}" ]; then
-      existing_tags="$(curl -fsSL -H "Authorization: Bearer ${ghcr_token}" \
-        "https://ghcr.io/v2/${repo_path}/tags/list" 2>/dev/null | jq -r '.tags[]? // empty' || true)"
-      while IFS= read -r tag; do
-        [ -z "${tag}" ] && continue
-        case "${tag}" in
-          "${prefix}"_v*)
-            ver="${tag#${prefix}_v}"
-            if [[ "${ver}" =~ ^[0-9]+$ ]] && [ "${ver}" -gt "${max_ver}" ]; then
-              max_ver="${ver}"
-            fi
-            ;;
-        esac
-      done <<< "${existing_tags}"
-    fi
-  fi
-
-  next_ver=$((max_ver + 1))
-  image_tag="${prefix}_v${next_ver}"
-  tags="${image_tag}, dev"
+  tags="${image_tag}"
 fi
 
 if [ -n "${EXTRA_TAGS:-}" ]; then
