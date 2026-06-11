@@ -226,6 +226,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CHART_VERSION: ${{ needs.prepare-metadata.outputs.chart_version }}
+          IMAGE_TAG: ${{ needs.prepare-metadata.outputs.image_tag }}
           PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: |
           set -euo pipefail
@@ -246,8 +247,16 @@ jobs:
 
           dev_dir="${pages_dir}/dev"
           mkdir -p "${dev_dir}"
-          chart_package=$(basename "${packages[0]}")
-          cp -f "${packages[0]}" "${dev_dir}/${chart_package}"
+          new_package="${packages[0]}"
+          chart_package=$(basename "${new_package}")
+          existing_package="${dev_dir}/${chart_package}"
+
+          if [ -f "${existing_package}" ] && cmp -s "${new_package}" "${existing_package}"; then
+            echo "Chart ${chart_package} unchanged — skip gh-pages push (no new GitHub Pages deployment)"
+            exit 0
+          fi
+
+          cp -f "${new_package}" "${existing_package}"
 
           dev_url="${PAGES_URL}/dev"
           if [ -f "${dev_dir}/index.yaml" ]; then
@@ -264,7 +273,10 @@ jobs:
             echo "No changes to publish on gh-pages/dev"
             exit 0
           fi
-          git commit -m "Publish dev chart qubership-colly ${CHART_VERSION}"
+          git commit -m "$(cat <<EOF
+          chart: publish dev/qubership-colly ${CHART_VERSION} (${GITHUB_REF_NAME}, images:${IMAGE_TAG})
+          EOF
+          )"
           git push "${remote}" gh-pages
           echo "Published dev chart ${CHART_VERSION} to gh-pages/dev (${dev_url}/${chart_package})"
 
