@@ -277,73 +277,133 @@ jobs:
           INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
           UI_INGRESS_NAME: ${{ vars.COLLY_UI_INGRESS_NAME || env.COLLY_UI_INGRESS_NAME }}
           UI_INGRESS_HEALTH_PATH: ${{ vars.COLLY_UI_INGRESS_HEALTH_PATH || env.COLLY_UI_INGRESS_HEALTH_PATH }}
+          DEPLOY_REF: ${{ inputs.ref }}
+          CHART_VERSION: ${{ steps.chart.outputs.chart_version }}
         run: |
           set -euo pipefail
-          echo "### Namespace: ${INSTALL_NAMESPACE}"
-          kubectl get namespace "${INSTALL_NAMESPACE}" -o wide
-          kubectl get deployments,services,pods -n "${INSTALL_NAMESPACE}"
-          echo "### Ingresses"
-          kubectl get ingress -n "${INSTALL_NAMESPACE}" -o wide
 
-          echo "### Ingress check: ${UI_INGRESS_NAME}"
+          log() { printf '%s\n' "$*"; }
+          ok() { log "  ✓ $*"; }
+          pending() { log "  … $*"; }
+
+          workloads=(envgene-inventory-service environment-operational-service ui-service)
+          workload_rows=""
+
+          log ""
+          log "╭──────────────────────────────────────────────────────────╮"
+          log "│  Colly deploy verification                               │"
+          log "╰──────────────────────────────────────────────────────────╯"
+          log "  ref ${DEPLOY_REF}  ·  chart ${CHART_VERSION}  ·  ns ${INSTALL_NAMESPACE}"
+          log ""
+
+          log "Workloads"
+          workload_ok=true
+          for deploy in "${workloads[@]}"; do
+            if ! kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
+              log "  ✗ ${deploy} — not found"
+              workload_ok=false
+              workload_rows+="| ${deploy} | missing |\\n"
+              continue
+            fi
+            desired="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.spec.replicas}')"
+            ready="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.status.readyReplicas}')"
+            ready="${ready:-0}"
+            if [ "${ready}" = "${desired}" ] && [ "${desired}" -gt 0 ]; then
+              ok "${deploy}  ${ready}/${desired} ready"
+              workload_rows+="| \`${deploy}\` | ${ready}/${desired} ready |\\n"
+            else
+              log "  ✗ ${deploy}  ${ready}/${desired} ready"
+              workload_ok=false
+              workload_rows+="| \`${deploy}\` | ${ready}/${desired} ready |\\n"
+              kubectl rollout status "deployment/${deploy}" -n "${INSTALL_NAMESPACE}" --timeout=10m
+            fi
+          done
+          if [ "${workload_ok}" != "true" ]; then
+            echo "::error::One or more workloads are not ready"
+            exit 1
+          fi
+
+          log ""
+          log "Ingress  ${UI_INGRESS_NAME}"
           if ! kubectl get ingress "${UI_INGRESS_NAME}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
             echo "::error::Ingress ${UI_INGRESS_NAME} not found in namespace ${INSTALL_NAMESPACE}"
             exit 1
           fi
-          kubectl get ingress "${UI_INGRESS_NAME}" -n "${INSTALL_NAMESPACE}" -o wide
 
           ingress_host=""
           for attempt in $(seq 1 12); do
             ingress_host="$(kubectl get ingress "${UI_INGRESS_NAME}" -n "${INSTALL_NAMESPACE}" \
               -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
             if [ -n "${ingress_host}" ]; then
-              echo "Ingress address: ${ingress_host} (attempt ${attempt})"
               break
             fi
-            echo "Waiting for ingress address (attempt ${attempt}/12, retry in 10s)"
+            pending "address pending (${attempt}/12)"
             sleep 10
           done
           if [ -z "${ingress_host}" ]; then
-            echo "::error::Ingress ${UI_INGRESS_NAME} has no load balancer hostname yet"
+            echo "::error::Ingress ${UI_INGRESS_NAME} has no load balancer hostname"
             exit 1
           fi
 
-          health_path="${UI_INGRESS_HEALTH_PATH}"
-          health_path="${health_path#/}"
+          health_path="${UI_INGRESS_HEALTH_PATH#/}"
+          public_url="http://${ingress_host}/"
           health_url="http://${ingress_host}/${health_path}"
-          echo "Public URL: http://${ingress_host}/"
-          echo "### curl ${UI_INGRESS_NAME} (expect HTTP 200)"
-          echo "GET ${health_url}"
+          ok "address  ${ingress_host}"
 
+          log ""
+          log "HTTP probe"
+          log "  GET ${health_url}"
           http_code=""
+          curl_time=""
           for attempt in $(seq 1 12); do
-            http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
-              --connect-timeout 10 --max-time 30 "${health_url}" || true)"
+            curl_meta="$(curl -sS -o /dev/null -w '%{http_code} %{time_total}' \
+              --connect-timeout 10 --max-time 30 "${health_url}" || echo '000 0')"
+            http_code="${curl_meta%% *}"
+            curl_time="${curl_meta#* }"
             if [ "${http_code}" = "200" ]; then
-              echo "HTTP ${http_code} (attempt ${attempt})"
+              ok "HTTP ${http_code}  (${curl_time}s)"
               break
             fi
-            echo "HTTP ${http_code:-000} (attempt ${attempt}/12, retry in 10s)"
+            pending "HTTP ${http_code:-000} (${attempt}/12)"
             sleep 10
           done
           if [ "${http_code}" != "200" ]; then
-            echo "::error::Ingress ${UI_INGRESS_NAME} ${health_url} returned HTTP ${http_code:-000}, expected 200"
+            echo "::error::${health_url} → HTTP ${http_code:-000}, expected 200"
             exit 1
           fi
 
-          for deploy in envgene-inventory-service environment-operational-service ui-service; do
-            if kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
-              echo "### Rollout: ${deploy}"
-              kubectl rollout status "deployment/${deploy}" -n "${INSTALL_NAMESPACE}" --timeout=10m
-            else
-              echo "Deployment ${deploy} not present (skipped)"
-            fi
-          done
-          echo "### Pod readiness"
-          not_ready="$(kubectl get pods -n "${INSTALL_NAMESPACE}" -o json | jq '[.items[] | select(.status.phase != "Running" and .status.phase != "Succeeded")] | length')"
+          not_ready="$(kubectl get pods -n "${INSTALL_NAMESPACE}" -o json \
+            | jq '[.items[] | select(.status.phase != "Running" and .status.phase != "Succeeded")] | length')"
           if [ "${not_ready}" -gt 0 ]; then
+            echo "::warning::${not_ready} pod(s) not Running/Succeeded"
             kubectl get pods -n "${INSTALL_NAMESPACE}" -o wide
-            echo "::warning::Some pods are not Running/Succeeded (${not_ready})"
-          else
-            echo "All pods Running or Succeeded"
           fi
+
+          log ""
+          log "╭──────────────────────────────────────────────────────────╮"
+          log "│  All checks passed                                       │"
+          log "│  UI  ${public_url}"
+          log "╰──────────────────────────────────────────────────────────╯"
+          log ""
+
+          {
+            echo "## Deploy verification passed"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Ref | \`${DEPLOY_REF}\` |"
+            echo "| Chart | \`${CHART_VERSION}\` |"
+            echo "| Namespace | \`${INSTALL_NAMESPACE}\` |"
+            echo "| Ingress | \`${UI_INGRESS_NAME}\` |"
+            echo "| Address | [\`${ingress_host}\`](${public_url}) |"
+            echo "| Probe | \`GET /${health_path}\` → **${http_code}** (${curl_time}s) |"
+            echo ""
+            echo "### Workloads"
+            echo "| Deployment | Status |"
+            echo "|---|---|"
+            printf '%b' "${workload_rows}"
+            echo ""
+            echo "**Open UI:** ${public_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
