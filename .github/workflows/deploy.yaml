@@ -285,34 +285,48 @@ jobs:
           workloads=(envgene-inventory-service environment-operational-service ui-service)
 
           echo "Colly deploy verification"
-          echo "ref=${DEPLOY_REF} chart=${CHART_VERSION} namespace=${INSTALL_NAMESPACE}"
+          echo "branch/tag=${DEPLOY_REF}"
+          echo "chart=${CHART_VERSION}"
+          echo "namespace=${INSTALL_NAMESPACE}"
           echo ""
 
-          echo "Workloads:"
-          workload_ok=true
+          pods_ok=true
           for deploy in "${workloads[@]}"; do
             if ! kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
-              echo "  ${deploy}: not found"
-              workload_ok=false
-              continue
+              echo "FAIL: deployment ${deploy} not found in namespace ${INSTALL_NAMESPACE}"
+              exit 1
             fi
             desired="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
               -o jsonpath='{.spec.replicas}')"
             ready="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
               -o jsonpath='{.status.readyReplicas}')"
             ready="${ready:-0}"
-            if [ "${ready}" = "${desired}" ] && [ "${desired}" -gt 0 ]; then
-              echo "  ${deploy}: ${ready}/${desired} ready"
-            else
-              echo "  ${deploy}: ${ready}/${desired} ready (waiting)"
-              workload_ok=false
+            if [ "${ready}" != "${desired}" ] || [ "${desired}" -le 0 ]; then
               kubectl rollout status "deployment/${deploy}" -n "${INSTALL_NAMESPACE}" --timeout=10m
             fi
           done
-          if [ "${workload_ok}" != "true" ]; then
-            echo "FAIL: one or more workloads are not ready"
+
+          for deploy in "${workloads[@]}"; do
+            desired="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.spec.replicas}')"
+            ready="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.status.readyReplicas}')"
+            ready="${ready:-0}"
+            if [ "${ready}" != "${desired}" ] || [ "${desired}" -le 0 ]; then
+              pods_ok=false
+            fi
+          done
+          if [ "${pods_ok}" != "true" ]; then
+            echo "FAIL: one or more pods are not ready"
+            kubectl get pods -n "${INSTALL_NAMESPACE}" \
+              -l 'app.kubernetes.io/name in (envgene-inventory-service,environment-operational-service,ui-service)' \
+              -o wide
             exit 1
           fi
+
+          echo "Pods:"
+          kubectl get pods -n "${INSTALL_NAMESPACE}" \
+            -l 'app.kubernetes.io/name in (envgene-inventory-service,environment-operational-service,ui-service)'
           echo ""
 
           echo "Ingress ${UI_INGRESS_NAME}:"
@@ -376,6 +390,8 @@ jobs:
 
           {
             echo "Deploy verification passed"
-            echo "ref=${DEPLOY_REF} chart=${CHART_VERSION} namespace=${INSTALL_NAMESPACE}"
+            echo "branch/tag=${DEPLOY_REF}"
+            echo "chart=${CHART_VERSION}"
+            echo "namespace=${INSTALL_NAMESPACE}"
             echo "UI: ${public_url}"
           } >> "$GITHUB_STEP_SUMMARY"
