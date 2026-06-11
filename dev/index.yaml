@@ -2,10 +2,10 @@ apiVersion: v1
 entries:
   qubership-colly:
   - apiVersion: v2
-    created: "2026-06-11T13:22:26.06379263Z"
-    digest: 423ceeed186b4349bb7fb882c30e204f179622ab3547228d96457275a0c01076
+    created: "2026-06-11T13:29:07.491921532Z"
+    digest: 6e433f34daa21b80a89b105495babe419c3dd4b1210ecf58fa78f01d84fc64ce
     name: qubership-colly
     urls:
     - https://andyroode.github.io/qubership-colly/dev/qubership-colly-0.0.0-latest.tgz
     version: 0.0.0-latest
-generated: "2026-06-11T13:22:26.063202841Z"
+generated: "2026-06-11T13:29:07.491348316Z"
