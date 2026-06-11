@@ -278,6 +278,21 @@ jobs:
           echo "### Namespace: ${INSTALL_NAMESPACE}"
           kubectl get namespace "${INSTALL_NAMESPACE}" -o wide
           kubectl get deployments,services,pods -n "${INSTALL_NAMESPACE}"
+          echo "### Ingresses"
+          kubectl get ingress -n "${INSTALL_NAMESPACE}" -o wide
+          if kubectl get ingress ui-service-http -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
+            echo "### ui-service-http"
+            kubectl get ingress ui-service-http -n "${INSTALL_NAMESPACE}" -o wide
+            ui_host="$(kubectl get ingress ui-service-http -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+            if [ -n "${ui_host}" ]; then
+              echo "UI URL: http://${ui_host}/"
+            else
+              echo "UI load balancer hostname not assigned yet (ALB may still be provisioning)"
+            fi
+          else
+            echo "::warning::Ingress ui-service-http not found in namespace ${INSTALL_NAMESPACE}"
+          fi
           for deploy in envgene-inventory-service environment-operational-service ui-service; do
             if kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
               echo "### Rollout: ${deploy}"
