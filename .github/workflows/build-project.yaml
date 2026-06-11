@@ -3,10 +3,6 @@ name: Build Images
 on:
   workflow_dispatch:
     inputs:
-      tags:
-        description: 'Additional tags for Docker images (comma separated)'
-        required: false
-        default: ''
       dry-run:
         description: 'If true, the workflow will run in dry-run mode without pushing images'
         required: false
@@ -82,11 +78,21 @@ jobs:
       - name: Calculate branch image tag
         id: calculate_image_tag
         shell: bash
-        env:
-          EXTRA_TAGS: ${{ github.event.inputs.tags }}
-          REF_NAME: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
-        run: bash "${GITHUB_WORKSPACE}/.github/scripts/calculate-image-tag.sh"
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" != "branch" ]; then
+            echo "::error::Dev builds use branch refs only (no git tags like 1.2.3)"
+            exit 1
+          fi
+          ref_name="${{ github.ref_name }}"
+          if [ "$ref_name" = "main" ]; then
+            echo "value=latest" >> "$GITHUB_OUTPUT"
+            echo "tags=latest, main" >> "$GITHUB_OUTPUT"
+          else
+            image_tag=$(echo "$ref_name" | tr '[:upper:]' '[:lower:]' | sed 's|/|-|g' | sed 's|_|-|g')
+            echo "value=${image_tag}" >> "$GITHUB_OUTPUT"
+            echo "tags=${image_tag}" >> "$GITHUB_OUTPUT"
+          fi
 
   build:
     name: Build Docker Images

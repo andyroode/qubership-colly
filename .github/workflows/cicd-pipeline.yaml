@@ -1,37 +1,16 @@
-# Fork-only publish: images and Helm charts are pushed to ghcr.io/<fork-owner>/... on push to a fork.
+# Fork-only publish: Docker images to GHCR; dev Helm charts to gh-pages/dev/ (release charts use gh-pages root).
 # Upstream (Netcracker/qubership-colly) always builds in dry-run and never publishes from this workflow.
 name: "Build"
 
 on:
   workflow_dispatch:
     inputs:
-      tags:
-        description: 'Additional tags for Docker images (comma separated)'
-        required: false
-        default: ''
       dry-run:
-        description: 'Skip pushing Docker images and Helm chart to GHCR (fork only; upstream never publishes from this workflow)'
-        required: false
-        default: true
-        type: boolean
-      publish-helm-oci:
-        description: 'Push packaged Helm chart to GHCR (OCI). Fork only; ignored on upstream.'
-        required: false
-        default: true
-        type: boolean
-      upload-helm-tarball:
-        description: >-
-          Package Helm chart; publish pre-release on GitHub Releases (visible on repo home page, fork only)
-          and upload workflow artifacts (.tgz + helm-charts.tar.gz)
+        description: 'Skip pushing Docker images to GHCR (fork only; upstream never publishes from this workflow)'
         required: false
         default: true
         type: boolean
   push:
-
-env:
-  # GHCR OCI package path (chart name in repo stays qubership-colly)
-  HELM_PACKAGE_NAME: colly-stack
-
 permissions:
   contents: read
   packages: write
@@ -95,27 +74,10 @@ jobs:
       platforms: ${{ steps.load_component.outputs.platforms }}
       metadata: "${{ steps.calculate_image_tag.outputs.tags }}"
       image_tag: "${{ steps.calculate_image_tag.outputs.value }}"
+      chart_version: "${{ steps.calculate_image_tag.outputs.chart_version }}"
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Publish mode
-        shell: bash
-        run: |
-          {
-            echo "## Container publish mode"
-            if [ "${{ github.event.repository.fork }}" = "true" ]; then
-              echo "Fork repository: on \`main\` images use \`latest\` and \`main\`; other branches use \`<branch-with-hyphens>\` (no version increment) when dry-run is off."
-              echo "Helm chart OCI: \`oci://ghcr.io/${{ github.repository_owner }}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly:<chart-version>\` when **publish-helm-oci** is on and dry-run is off."
-              echo "Helm tarballs: GitHub **Releases** (pre-release \`dev-0.0.0-<run>\`, visible on repo home) + workflow artifacts when **upload-helm-tarball** is on."
-              echo "Manual run: disable **dry-run** to push images; use **publish-helm-oci** / **upload-helm-tarball** independently."
-              echo "Push events on a fork publish OCI and tarballs by default."
-              echo "Chart values: \`values.yaml\` image tags are updated and **committed to the current branch** (with \`[skip ci]\` to avoid rebuild loops)."
-              echo "Deploy: run workflow **Deploy Colly** with \`chart-version: latest\`."
-            else
-              echo "Upstream repository: build only (dry-run), no GHCR publish from this workflow."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Load Docker Configuration
         id: load_component
@@ -146,24 +108,23 @@ jobs:
       - name: Calculate branch image tag
         id: calculate_image_tag
         shell: bash
-        env:
-          EXTRA_TAGS: ${{ github.event.inputs.tags }}
-          REF_NAME: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
         run: |
-          bash "${GITHUB_WORKSPACE}/.github/scripts/calculate-image-tag.sh"
-          {
-            echo "### Docker image tags"
-            if [ "${{ github.ref_name }}" = "main" ]; then
-              echo "- Branch: \`main\` (fixed tags)"
-              echo "- Tags: \`latest\`, \`main\`"
-              echo "- Helm values tag: \`latest\`"
-            else
-              echo "- Branch tag (hyphens, no increment): \`${{ steps.calculate_image_tag.outputs.value }}\`"
-              echo "- Tags for build: \`${{ steps.calculate_image_tag.outputs.tags }}\`"
-              echo "- Helm values tag: \`${{ steps.calculate_image_tag.outputs.value }}\`"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" != "branch" ]; then
+            echo "::error::Dev builds use branch refs only (no git tags like 1.2.3)"
+            exit 1
+          fi
+          ref_name="${{ github.ref_name }}"
+          if [ "$ref_name" = "main" ]; then
+            image_tag="latest"
+            echo "value=${image_tag}" >> "$GITHUB_OUTPUT"
+            echo "tags=latest, main" >> "$GITHUB_OUTPUT"
+          else
+            image_tag=$(echo "$ref_name" | tr '[:upper:]' '[:lower:]' | sed 's|/|-|g' | sed 's|_|-|g')
+            echo "value=${image_tag}" >> "$GITHUB_OUTPUT"
+            echo "tags=${image_tag}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "chart_version=0.0.0-${image_tag}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build Docker Images
@@ -195,10 +156,10 @@ jobs:
   publish-helm-chart:
     name: Publish Helm Chart
     needs: [build, prepare-metadata]
+    if: github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run)
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -206,56 +167,12 @@ jobs:
           ref: ${{ github.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve Helm publish options
-        id: helm_opts
-        shell: bash
-        run: |
-          set -euo pipefail
-          publish_oci=false
-          upload_tarball=false
-          is_fork="${{ github.event.repository.fork }}"
-          is_dispatch="${{ github.event_name == 'workflow_dispatch' }}"
-          dry_run="${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}"
-
-          if [ "$is_fork" = "true" ]; then
-            if [ "$is_dispatch" = "true" ]; then
-              [ "${{ inputs.publish-helm-oci }}" = "true" ] && publish_oci=true
-              [ "${{ inputs.upload-helm-tarball }}" = "true" ] && upload_tarball=true
-            else
-              publish_oci=true
-              upload_tarball=true
-            fi
-          elif [ "$is_dispatch" = "true" ]; then
-            [ "${{ inputs.upload-helm-tarball }}" = "true" ] && upload_tarball=true
-          fi
-
-          if [ "$dry_run" = "true" ]; then
-            publish_oci=false
-          fi
-
-          package_charts=false
-          if [ "$publish_oci" = "true" ] || [ "$upload_tarball" = "true" ]; then
-            package_charts=true
-          fi
-
-          {
-            echo "publish_oci=${publish_oci}"
-            echo "upload_tarball=${upload_tarball}"
-            echo "package_charts=${package_charts}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Set chart version
-        id: chart_version
-        shell: bash
-        run: echo "value=0.0.0-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-
-      - name: Update chart values and publish
+      - name: Update chart values and package
         id: update_chart
-        if: steps.helm_opts.outputs.package_charts == 'true'
         uses: netcracker/qubership-workflow-hub/actions/charts-values-update-action@v2.1.2
         with:
           release-version: ${{ needs.prepare-metadata.outputs.image_tag }}
-          chart-version: ${{ steps.chart_version.outputs.value }}
+          chart-version: ${{ needs.prepare-metadata.outputs.chart_version }}
           config-file: .github/helm-chart-dev-config.yaml
           create-release-branch: false
           version-replace-method: parse
@@ -267,10 +184,6 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
 
       - name: Commit updated chart values to branch
-        if: >-
-          steps.helm_opts.outputs.package_charts == 'true'
-          && github.event.repository.fork == true
-          && !(github.event_name == 'workflow_dispatch' && inputs.dry-run)
         shell: bash
         env:
           IMAGE_TAG: ${{ needs.prepare-metadata.outputs.image_tag }}
@@ -294,123 +207,52 @@ jobs:
           git push origin "HEAD:${GITHUB_REF_NAME}"
           echo "Committed and pushed ${values_file} to ${GITHUB_REF_NAME}"
 
-      - name: Create Helm charts source archive (tar.gz)
-        if: steps.helm_opts.outputs.upload_tarball == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          tar -czf dist/helm-charts.tar.gz -C charts .
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
 
-      - name: Upload Helm charts source archive (tar.gz)
-        if: steps.helm_opts.outputs.upload_tarball == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: helm-charts-${{ steps.chart_version.outputs.value }}
-          path: dist/helm-charts.tar.gz
-          retention-days: 30
-
-      - name: Publish Helm charts to GitHub Release
-        if: steps.helm_opts.outputs.upload_tarball == 'true' && github.event.repository.fork == true
-        id: github_release
+      - name: Publish Helm chart to gh-pages
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CHART_VERSION: ${{ steps.chart_version.outputs.value }}
-          IMAGE_TAG: ${{ needs.prepare-metadata.outputs.image_tag }}
+          CHART_VERSION: ${{ needs.prepare-metadata.outputs.chart_version }}
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: |
           set -euo pipefail
-          release_tag="dev-${CHART_VERSION}"
-          release_dir="release-assets"
-          mkdir -p "${release_dir}"
           shopt -s nullglob
           packages=(.cr-release-packages/*.tgz)
           if [ "${#packages[@]}" -eq 0 ]; then
-            echo "::error::No packaged chart .tgz found for GitHub Release"
+            echo "::error::No packaged chart .tgz found"
             exit 1
           fi
-          cp "${packages[0]}" "${release_dir}/"
-          cp dist/helm-charts.tar.gz "${release_dir}/helm-charts-${CHART_VERSION}.tar.gz"
-          notes_file="$(mktemp)"
-          {
-            echo "Dev Helm chart build from workflow run #${GITHUB_RUN_NUMBER}."
-            echo ""
-            echo "- Chart version: \`${CHART_VERSION}\`"
-            echo "- Image tag in values: \`${IMAGE_TAG}\`"
-            echo "- Branch: \`${GITHUB_REF_NAME}\`"
-            echo "- Commit: \`${GITHUB_SHA}\`"
-            echo ""
-            echo "**Assets**"
-            echo "- Packaged chart (\`.tgz\`) — same as OCI package"
-            echo "- \`helm-charts-${CHART_VERSION}.tar.gz\` — charts source tree"
-            echo ""
-            echo "**Deploy Colly**: \`chart-source: release\`, \`chart-version: ${CHART_VERSION}\` or \`latest\`"
-          } > "${notes_file}"
-          gh release create "${release_tag}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "Dev build ${CHART_VERSION}" \
-            --notes-file "${notes_file}" \
-            --prerelease \
-            "${release_dir}/"*
-          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${release_tag}"
-          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
-          echo "release_url=${release_url}" >> "$GITHUB_OUTPUT"
-          echo "Published pre-release: ${release_url}"
 
-      - name: Publish helm chart package to GHCR
-        if: steps.helm_opts.outputs.publish_oci == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
-            -u "${{ github.actor }}" --password-stdin
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          for chart in "${GITHUB_WORKSPACE}/.cr-release-packages/"*.tgz; do
-            helm push "${chart}" "oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}"
-          done
-          helm registry logout ghcr.io
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          pages_dir=$(mktemp -d)
+          if git ls-remote --exit-code --heads "${remote}" gh-pages >/dev/null 2>&1; then
+            git clone --depth 1 --branch gh-pages "${remote}" "${pages_dir}"
+          else
+            git init -b gh-pages "${pages_dir}"
+          fi
 
-      - name: Helm publish summary
-        shell: bash
-        env:
-          PUBLISH_OCI: ${{ steps.helm_opts.outputs.publish_oci }}
-          UPLOAD_TARBALL: ${{ steps.helm_opts.outputs.upload_tarball }}
-          PACKAGE_CHARTS: ${{ steps.helm_opts.outputs.package_charts }}
-          HELM_PACKAGE: ${{ env.HELM_PACKAGE_NAME }}
-        run: |
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          {
-            echo "## Helm chart"
-            echo "- Chart in repo: \`qubership-colly\` (unchanged)"
-            echo "- GHCR package: \`${HELM_PACKAGE}\`"
-            echo "- Image tag in values: \`${{ needs.prepare-metadata.outputs.image_tag }}\`"
-            echo "- Chart version (SemVer in package): \`${{ steps.chart_version.outputs.value }}\`"
-            if [ "${PACKAGE_CHARTS}" != "true" ]; then
-              echo "- Helm packaging skipped (**publish-helm-oci** and **upload-helm-tarball** are both off)."
-            else
-              if [ "${PUBLISH_OCI}" = "true" ]; then
-                echo "- OCI: \`oci://ghcr.io/${owner}/${HELM_PACKAGE}/qubership-colly --version ${{ steps.chart_version.outputs.value }}\`"
-                echo "- **Deploy Colly** (chart-source: \`oci\`):"
-                echo "  - \`chart-version\`: \`latest\` or \`${{ steps.chart_version.outputs.value }}\`"
-              else
-                echo "- OCI publish skipped (dry-run or **publish-helm-oci** off)."
-              fi
-              if [ "${UPLOAD_TARBALL}" = "true" ]; then
-                if [ "${{ github.event.repository.fork }}" = "true" ]; then
-                  echo "- GitHub Release (repo home → Releases): \`${{ steps.github_release.outputs.release_url }}\`"
-                  echo "  - Tag: \`${{ steps.github_release.outputs.release_tag }}\`"
-                  echo "  - All dev builds: \`https://github.com/${GITHUB_REPOSITORY}/releases\`"
-                fi
-                echo "- Workflow artifacts (90-day retention on public repos):"
-                echo "  - \`released-charts\` — packaged chart \`.tgz\`"
-                echo "  - \`helm-charts-${{ steps.chart_version.outputs.value }}\` — source tree \`helm-charts.tar.gz\`"
-                echo "- **Deploy Colly** (recommended: \`chart-source: release\`):"
-                echo "  - \`chart-version\`: \`${{ steps.chart_version.outputs.value }}\` or \`latest\`"
-                echo "  - \`artifact-type\`: \`chart-package\` (recommended) or \`charts-archive\`"
-                echo "- Or \`chart-source: artifact\` to pull from this workflow run's artifacts"
-              else
-                echo "- Tarball artifacts skipped (**upload-helm-tarball** off)."
-              fi
-              echo "- \`image-tag\` (Deploy Colly, optional): \`${{ needs.prepare-metadata.outputs.image_tag }}\`"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          dev_dir="${pages_dir}/dev"
+          mkdir -p "${dev_dir}"
+          chart_package=$(basename "${packages[0]}")
+          cp -f "${packages[0]}" "${dev_dir}/${chart_package}"
+
+          dev_url="${PAGES_URL}/dev"
+          if [ -f "${dev_dir}/index.yaml" ]; then
+            helm repo index "${dev_dir}" --url "${dev_url}" --merge "${dev_dir}/index.yaml"
+          else
+            helm repo index "${dev_dir}" --url "${dev_url}"
+          fi
+
+          cd "${pages_dir}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dev/
+          if git diff --staged --quiet; then
+            echo "No changes to publish on gh-pages/dev"
+            exit 0
+          fi
+          git commit -m "Publish dev chart qubership-colly ${CHART_VERSION}"
+          git push "${remote}" gh-pages
+          echo "Published dev chart ${CHART_VERSION} to gh-pages/dev (${dev_url}/${chart_package})"
