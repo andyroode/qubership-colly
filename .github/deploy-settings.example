@@ -34,3 +34,5 @@
 # COLLY_HELM_RELEASE               (variable, optional; default = install namespace)
 # COLLY_HELM_EXTRA_ARGS            (variable, optional extra helm args)
 # COLLY_CLOUD_PUBLIC_HOST          (variable, optional public ingress host)
+# COLLY_UI_INGRESS_NAME            (variable, default ui-service-http — ingress for post-deploy curl check)
+# COLLY_UI_INGRESS_HEALTH_PATH     (variable, default /q/health/live — path for curl check, no auth)
