@@ -287,6 +287,24 @@ jobs:
               -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
             if [ -n "${ui_host}" ]; then
               echo "UI URL: http://${ui_host}/"
+              ui_health_url="http://${ui_host}/q/health/live"
+              echo "### curl ui-service-http (expect HTTP 200)"
+              echo "GET ${ui_health_url}"
+              http_code=""
+              for attempt in $(seq 1 12); do
+                http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+                  --connect-timeout 10 --max-time 30 "${ui_health_url}" || true)"
+                if [ "${http_code}" = "200" ]; then
+                  echo "HTTP ${http_code} (attempt ${attempt})"
+                  break
+                fi
+                echo "HTTP ${http_code:-000} (attempt ${attempt}/12, retry in 10s)"
+                sleep 10
+              done
+              if [ "${http_code}" != "200" ]; then
+                echo "::error::ui-service-http ${ui_health_url} returned HTTP ${http_code:-000}, expected 200"
+                exit 1
+              fi
             else
               echo "UI load balancer hostname not assigned yet (ALB may still be provisioning)"
             fi
