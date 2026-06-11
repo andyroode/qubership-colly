@@ -1,39 +1,22 @@
-# Manual deploy of a published Helm chart to EKS.
-# Run after a successful Build workflow (fork, publish enabled).
+# Deploy dev Helm chart (gh-pages/dev) to EKS.
+# Standalone: workflow_dispatch. From Build pipeline: workflow_call (see cicd-pipeline.yaml).
 name: Deploy Colly
 
 on:
   workflow_dispatch:
     inputs:
-      chart-source:
-        description: 'Where to load the Helm chart from'
-        required: true
-        type: choice
-        options:
-          - release
-          - oci
-          - artifact
-        default: release
-      chart-version:
+      ref:
         description: >-
-          Chart version from Build workflow (Publish Helm Chart summary).
-          Use latest (recommended) or 0.0.0-<run_number> (matches Build workflow run number).
-          For release source, maps to GitHub pre-release tag dev-0.0.0-<run_number>.
+          Branch or Docker/chart tag to deploy.
+          Branch: main, feature/my-fix (normalized to feature-my-fix).
+          Tag: latest, main, feature-my-fix (used as-is; chart version 0.0.0-<tag>).
         required: true
         type: string
-        default: latest
-      artifact-type:
-        description: 'Asset to use when chart-source=release or artifact'
-        required: true
-        type: choice
-        options:
-          - chart-package
-          - charts-archive
-        default: chart-package
+        default: main
       image-tag:
         description: >-
-          Docker image tag for all Colly services (ghcr.io/<owner>/<service>:<tag>).
-          Leave empty to use image refs baked into the chart at publish time (usually latest on main, dev on other branches).
+          Docker image tag override for all Colly services (ghcr.io/<owner>/<service>:<tag>).
+          Leave empty to use image refs baked into the chart at publish time.
         required: false
         default: ''
         type: string
@@ -42,16 +25,29 @@ on:
         required: false
         default: false
         type: boolean
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Branch or Docker/chart tag to deploy'
+        required: true
+        type: string
+      image-tag:
+        description: 'Optional Docker image tag override'
+        required: false
+        type: string
+        default: ''
+      helm-dry-run:
+        description: 'Helm dry-run only (render manifests, do not apply)'
+        required: false
+        type: boolean
+        default: false
 
 env:
-  HELM_PACKAGE_NAME: colly-stack
   COLLY_EKS_CLUSTER: Qubership-pioneer
   COLLY_INSTALL_NAMESPACE: qubership-colly-test
 
 permissions:
   contents: read
-  packages: read
-  actions: read
 
 jobs:
   deploy:
@@ -117,38 +113,48 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve deploy parameters
-        id: params
+      - name: Resolve chart version from ref
+        id: chart
         shell: bash
         env:
-          IMAGE_TAG_INPUT: ${{ github.event.inputs.image-tag }}
-          CHART_SOURCE: ${{ github.event.inputs.chart-source }}
-          CHART_VERSION: ${{ github.event.inputs.chart-version }}
-          ARTIFACT_TYPE: ${{ github.event.inputs.artifact-type }}
+          REF: ${{ inputs.ref }}
+          IMAGE_TAG_INPUT: ${{ inputs.image-tag }}
         run: |
+          set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          chart_ref="oci://ghcr.io/${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
+          ref="${REF}"
+
+          normalize_branch() {
+            echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's|/|-|g' | sed 's|_|-|g'
+          }
+
+          if [ "${ref}" = "main" ] || [[ "${ref}" == */* ]]; then
+            ref_kind="branch"
+            if [ "${ref}" = "main" ]; then
+              image_tag="latest"
+            else
+              image_tag=$(normalize_branch "${ref}")
+            fi
+          else
+            ref_kind="tag"
+            image_tag="${ref}"
+          fi
+
+          chart_version="0.0.0-${image_tag}"
+          dev_repo_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${{ github.event.repository.name }}/dev"
+
           echo "owner=${owner}" >> "$GITHUB_OUTPUT"
-          echo "chart_ref=${chart_ref}" >> "$GITHUB_OUTPUT"
-          echo "chart_source=${CHART_SOURCE}" >> "$GITHUB_OUTPUT"
-          echo "artifact_type=${ARTIFACT_TYPE}" >> "$GITHUB_OUTPUT"
+          echo "ref_kind=${ref_kind}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+          echo "chart_version=${chart_version}" >> "$GITHUB_OUTPUT"
+          echo "dev_repo_url=${dev_repo_url}" >> "$GITHUB_OUTPUT"
+
           {
             echo "## Deploy parameters"
-            echo "- Chart source: \`${CHART_SOURCE}\`"
-            if [ "${CHART_SOURCE}" = "oci" ]; then
-              echo "- Chart: \`${chart_ref}\`"
-            elif [ "${CHART_SOURCE}" = "release" ]; then
-              echo "- GitHub Release tag: \`dev-<version>\` (pre-release, visible on repo home → Releases)"
-              echo "- Asset type: \`${ARTIFACT_TYPE}\`"
-            else
-              echo "- Workflow artifact type: \`${ARTIFACT_TYPE}\`"
-              if [ "${ARTIFACT_TYPE}" = "chart-package" ]; then
-                echo "- Artifact name: \`released-charts\` (packaged \`.tgz\`)"
-              else
-                echo "- Artifact name: \`helm-charts-<version>\` (source \`helm-charts.tar.gz\`)"
-              fi
-            fi
-            echo "- Chart version: \`${CHART_VERSION}\`"
+            echo "- Input (\`${ref_kind}\`): \`${ref}\`"
+            echo "- Chart version: \`${chart_version}\`"
+            echo "- Dev Helm repo: \`${dev_repo_url}\`"
+            echo "- Image tag in chart: \`${image_tag}\`"
             if [ -n "${IMAGE_TAG_INPUT}" ]; then
               echo "- Image tag override: \`${IMAGE_TAG_INPUT}\`"
               echo "  - \`ghcr.io/${owner}/envgene-inventory-service:${IMAGE_TAG_INPUT}\`"
@@ -159,173 +165,24 @@ jobs:
             fi
             echo "- Namespace: \`${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
             echo "- Helm release: \`${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
-            echo "- Secrets: substituted at deploy into chart values (not stored in GHCR package or artifacts)"
-            echo "- Helm dry-run: \`${{ github.event.inputs.helm-dry-run }}\`"
+            echo "- Helm dry-run: \`${{ inputs.helm-dry-run }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Resolve chart version and Build run
-        id: chart_resolve
+      - name: Fetch chart from gh-pages dev repo
         shell: bash
         env:
-          CHART_SOURCE: ${{ github.event.inputs.chart-source }}
-          CHART_VERSION: ${{ github.event.inputs.chart-version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          resolve_chart_version="${CHART_VERSION}"
-          workflow_file="cicd-pipeline.yaml"
-
-          if [ "${CHART_SOURCE}" = "oci" ] && [ "${resolve_chart_version}" = "latest" ]; then
-            owner="${GITHUB_REPOSITORY_OWNER,,}"
-            repo_path="${owner}/${{ env.HELM_PACKAGE_NAME }}/qubership-colly"
-            echo "Resolving latest chart version from GHCR tags (helm requires SemVer, not latest)"
-            ghcr_token="$(curl -fsSL -u "${{ github.actor }}:${GH_TOKEN}" \
-              "https://ghcr.io/token?scope=repository:${repo_path}:pull" | jq -r '.token')"
-            tags="$(curl -fsSL -H "Authorization: Bearer ${ghcr_token}" \
-              "https://ghcr.io/v2/${repo_path}/tags/list" | jq -r '.tags[]? // empty')"
-            resolve_chart_version="$(echo "${tags}" | grep -E '^0\.0\.0-[0-9]+$' | sort -t'-' -k2 -n | tail -1)"
-            if [ -z "${resolve_chart_version}" ]; then
-              resolve_chart_version="$(echo "${tags}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)"
-            fi
-            if [ -z "${resolve_chart_version}" ]; then
-              echo "::error::No chart version tags found in ghcr.io/${repo_path}"
-              exit 1
-            fi
-            echo "Latest OCI chart version: ${resolve_chart_version}"
-          fi
-
-          if [ "${CHART_SOURCE}" = "release" ]; then
-            if [ "${resolve_chart_version}" = "latest" ]; then
-              release_tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 50 \
-                --json tagName --jq '[.[] | select(.tagName | startswith("dev-"))][0].tagName')"
-              if [ -z "${release_tag}" ] || [ "${release_tag}" = "null" ]; then
-                echo "::error::No dev pre-releases found. Run Build with upload-helm-tarball on a fork first."
-                exit 1
-              fi
-              resolve_chart_version="${release_tag#dev-}"
-              echo "Latest dev release: ${release_tag}"
-            else
-              release_tag="dev-${resolve_chart_version}"
-            fi
-            if ! gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-              echo "::error::GitHub Release ${release_tag} not found (https://github.com/${GITHUB_REPOSITORY}/releases)"
-              exit 1
-            fi
-            echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
-          fi
-
-          if [ "${CHART_SOURCE}" = "artifact" ]; then
-            if [ "${resolve_chart_version}" = "latest" ]; then
-              run_id="$(gh api \
-                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?status=success&per_page=1" \
-                --jq '.workflow_runs[0].id')"
-              run_number="$(gh api \
-                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?status=success&per_page=1" \
-                --jq '.workflow_runs[0].run_number')"
-              if [ -z "${run_id}" ] || [ "${run_id}" = "null" ]; then
-                echo "::error::No successful Build workflow runs found for artifact download"
-                exit 1
-              fi
-              resolve_chart_version="0.0.0-${run_number}"
-              echo "Latest Build run: id=${run_id}, chart version=${resolve_chart_version}"
-            else
-              run_number="${resolve_chart_version#0.0.0-}"
-              if [ "${run_number}" = "${resolve_chart_version}" ] || ! [[ "${run_number}" =~ ^[0-9]+$ ]]; then
-                echo "::error::Artifact source requires chart-version latest or 0.0.0-<run_number>"
-                exit 1
-              fi
-              run_id="$(gh api \
-                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?status=success&per_page=100" \
-                --jq ".workflow_runs[] | select(.run_number==${run_number}) | .id" | head -1)"
-              if [ -z "${run_id}" ]; then
-                echo "::error::No successful Build workflow run with run_number=${run_number}"
-                exit 1
-              fi
-              echo "Resolved Build run id=${run_id} for chart version ${resolve_chart_version}"
-            fi
-            echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
-          fi
-
-          echo "resolve_chart_version=${resolve_chart_version}" >> "$GITHUB_OUTPUT"
-
-      - name: Fetch chart from GHCR (OCI)
-        if: github.event.inputs.chart-source == 'oci'
-        id: fetch_oci
-        shell: bash
-        env:
-          CHART_REF: ${{ steps.params.outputs.chart_ref }}
-          RESOLVE_CHART_VERSION: ${{ steps.chart_resolve.outputs.resolve_chart_version }}
+          DEV_REPO_URL: ${{ steps.chart.outputs.dev_repo_url }}
+          CHART_VERSION: ${{ steps.chart.outputs.chart_version }}
         run: |
           set -euo pipefail
           chart_dir="$(mktemp -d)"
-          echo "Pulling ${CHART_REF} version ${RESOLVE_CHART_VERSION}"
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
-            -u "${{ github.actor }}" --password-stdin
-          helm pull "${CHART_REF}" --version "${RESOLVE_CHART_VERSION}" --untar -d "${chart_dir}"
-          helm registry logout ghcr.io
-          echo "chart_path=${chart_dir}/qubership-colly" >> "$GITHUB_OUTPUT"
-          echo "CHART_PATH=${chart_dir}/qubership-colly" >> "$GITHUB_ENV"
-
-      - name: Download chart assets from GitHub Release
-        if: github.event.inputs.chart-source == 'release'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.chart_resolve.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-          gh release download "${RELEASE_TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --dir ./chart-artifact
-
-      - name: Download packaged chart artifact (released-charts)
-        if: github.event.inputs.chart-source == 'artifact' && github.event.inputs.artifact-type == 'chart-package'
-        uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.chart_resolve.outputs.run_id }}
-          name: released-charts
-          path: ./chart-artifact
-
-      - name: Download charts source archive artifact
-        if: github.event.inputs.chart-source == 'artifact' && github.event.inputs.artifact-type == 'charts-archive'
-        uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.chart_resolve.outputs.run_id }}
-          name: helm-charts-${{ steps.chart_resolve.outputs.resolve_chart_version }}
-          path: ./chart-artifact
-
-      - name: Extract chart from downloaded assets
-        if: github.event.inputs.chart-source == 'release' || github.event.inputs.chart-source == 'artifact'
-        shell: bash
-        env:
-          ARTIFACT_TYPE: ${{ github.event.inputs.artifact-type }}
-          CHART_SOURCE: ${{ github.event.inputs.chart-source }}
-        run: |
-          set -euo pipefail
-          chart_dir="$(mktemp -d)"
-          if [ "${ARTIFACT_TYPE}" = "chart-package" ]; then
-            shopt -s nullglob
-            packages=(./chart-artifact/*.tgz)
-            if [ "${#packages[@]}" -eq 0 ]; then
-              echo "::error::No .tgz found (was upload-helm-tarball enabled in Build?)"
-              exit 1
-            fi
-            tar -xzf "${packages[0]}" -C "${chart_dir}"
-          else
-            shopt -s nullglob
-            archives=(./chart-artifact/helm-charts*.tar.gz)
-            if [ "${#archives[@]}" -eq 0 ]; then
-              echo "::error::No helm-charts*.tar.gz found (was upload-helm-tarball enabled in Build?)"
-              exit 1
-            fi
-            tar -xzf "${archives[0]}" -C "${chart_dir}"
-          fi
-          if [ ! -d "${chart_dir}/qubership-colly" ]; then
-            echo "::error::Extracted chart directory qubership-colly not found"
+          echo "Adding Helm repo ${DEV_REPO_URL}"
+          helm repo add colly-dev "${DEV_REPO_URL}" --force-update
+          helm repo update colly-dev
+          echo "Pulling qubership-colly version ${CHART_VERSION}"
+          if ! helm pull colly-dev/qubership-colly --version "${CHART_VERSION}" --untar -d "${chart_dir}"; then
+            echo "::error::Chart qubership-colly:${CHART_VERSION} not found in ${DEV_REPO_URL}"
+            echo "Run Build for ref '${{ inputs.ref }}' with publish enabled first."
             exit 1
           fi
           echo "CHART_PATH=${chart_dir}/qubership-colly" >> "$GITHUB_ENV"
@@ -365,8 +222,8 @@ jobs:
         env:
           INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
           HELM_RELEASE: ${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
-          IMAGE_TAG: ${{ github.event.inputs.image-tag }}
-          HELM_DRY_RUN: ${{ github.event.inputs.helm-dry-run }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
+          HELM_DRY_RUN: ${{ inputs.helm-dry-run }}
           COLLY_HELM_EXTRA_ARGS: ${{ vars.COLLY_HELM_EXTRA_ARGS }}
           COLLY_CLOUD_PUBLIC_HOST: ${{ vars.COLLY_CLOUD_PUBLIC_HOST }}
           PROJECT_GIT_REPO_URL_EXAMPLE: ${{ secrets.PROJECT_GIT_REPO_URL_EXAMPLE }}
@@ -377,7 +234,7 @@ jobs:
           REDIS_HOST_PASSWORD: ${{ secrets.REDIS_HOST_PASSWORD }}
         run: |
           set -euo pipefail
-          owner="${{ steps.params.outputs.owner }}"
+          owner="${{ steps.chart.outputs.owner }}"
           chart_path="${CHART_PATH:?Chart path not set — fetch step failed}"
           helm_set_args=(--set "NAMESPACE=${INSTALL_NAMESPACE}")
           if [ -n "${COLLY_CLOUD_PUBLIC_HOST}" ]; then
@@ -401,7 +258,7 @@ jobs:
             < "${values_file}" > "${values_file}.tmp"
           mv "${values_file}.tmp" "${values_file}"
           echo "Applied secret placeholders in chart values"
-          echo "Deploying to namespace ${INSTALL_NAMESPACE} from ${chart_path}"
+          echo "Deploying qubership-colly:${{ steps.chart.outputs.chart_version }} to namespace ${INSTALL_NAMESPACE}"
           # shellcheck disable=SC2086
           helm upgrade --install "${HELM_RELEASE}" "${chart_path}" \
             --namespace "${INSTALL_NAMESPACE}" \
@@ -413,7 +270,7 @@ jobs:
             ${COLLY_HELM_EXTRA_ARGS}
 
       - name: Deployment healthcheck
-        if: ${{ github.event.inputs.helm-dry-run != true }}
+        if: ${{ inputs.helm-dry-run != true }}
         env:
           INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
         run: |

@@ -10,6 +10,17 @@ on:
         required: false
         default: true
         type: boolean
+      deploy:
+        description: 'Deploy to EKS after publish (fork, manual run only; requires dry-run off)'
+        required: false
+        default: false
+        type: boolean
+      deploy-ref:
+        description: >-
+          Branch or tag to deploy when deploy is on. Empty = current branch (github.ref_name).
+        required: false
+        default: ''
+        type: string
   push:
 permissions:
   contents: read
@@ -256,3 +267,18 @@ jobs:
           git commit -m "Publish dev chart qubership-colly ${CHART_VERSION}"
           git push "${remote}" gh-pages
           echo "Published dev chart ${CHART_VERSION} to gh-pages/dev (${dev_url}/${chart_package})"
+
+  deploy:
+    name: Deploy to EKS
+    needs: publish-helm-chart
+    if: >-
+      github.event.repository.fork == true
+      && github.event_name == 'workflow_dispatch'
+      && inputs.deploy
+      && !inputs.dry-run
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      ref: ${{ inputs.deploy-ref || github.ref_name }}
+      image-tag: ''
+      helm-dry-run: false
+    secrets: inherit

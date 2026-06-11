@@ -2,21 +2,21 @@
 # Settings → Secrets and variables → Actions
 #
 # ── Deploy Colly workflow inputs ─────────────────────────────────────────────
-# chart-source: release (default) | oci | artifact
-#   release   — GitHub pre-release dev-0.0.0-<run> (visible on repo home → Releases)
-#   oci       — helm pull from ghcr.io/<owner>/colly-stack/qubership-colly
-#   artifact  — workflow artifacts from a Build run (shorter retention)
-# artifact-type (when chart-source=release or artifact):
-#   chart-package  — packaged .tgz (recommended)
-#   charts-archive — helm-charts-<version>.tar.gz source tree
-# chart-version: latest or 0.0.0-<run_number> (Build workflow run number)
+# ref — branch or Docker/chart tag (single field):
+#   Branch examples: main, feature/my-fix  → chart 0.0.0-latest / 0.0.0-feature-my-fix
+#   Tag examples:    latest, feature-my-fix → chart 0.0.0-<tag>
+#   Branch if value is "main" or contains "/"; otherwise treated as a tag.
+#   Chart source: https://<owner>.github.io/<repo>/dev
 #
-# Dev tar.gz storage (fork, upload-helm-tarball on):
-#   https://github.com/<owner>/<repo>/releases — pre-releases tagged dev-0.0.0-<run>
+# image-tag — optional Docker tag override (leave empty to use refs from the chart)
+# helm-dry-run — render manifests only, do not apply
+#
+# Build workflow (cicd-pipeline.yaml) calls deploy.yaml when:
+# deploy=true, dry-run=false (manual run on fork only)
+# deploy-ref — branch or tag; empty = current branch
 #
 # ── Secrets (substituted at deploy time only) ────────────────────────────────
 # Names must match ${...} placeholders in charts/qubership-colly/values.yaml
-# These values are NOT baked into the Helm chart published to GHCR.
 #
 # PROJECT_GIT_REPO_URL_EXAMPLE     Git URL of project configuration repo
 # GH_TOKEN_EXAMPLE                 Git token for project configuration repo
@@ -31,6 +31,6 @@
 # AWS_REGION                       (variable, default us-east-1 in workflow)
 # TF_VAR_EKS_NEW_CLUSTERNAME       (variable, optional override)
 # TF_VAR_COLLY_INSTALL_NAMESPACE   (variable, optional override)
-# COLLY_HELM_RELEASE               (variable, optional; default = install namespace, e.g. qubership-colly-test)
+# COLLY_HELM_RELEASE               (variable, optional; default = install namespace)
 # COLLY_HELM_EXTRA_ARGS            (variable, optional extra helm args)
 # COLLY_CLOUD_PUBLIC_HOST          (variable, optional public ingress host)
