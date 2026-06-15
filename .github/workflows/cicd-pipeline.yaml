@@ -17,12 +17,12 @@ on:
   workflow_dispatch:
     inputs:
       build:
-        description: 'Build and publish Docker images + Helm chart'
+        description: 'Build'
         required: false
         default: true
         type: boolean
       deploy:
-        description: 'Deploy to EKS (fork, manual run only)'
+        description: 'Deploy'
         required: false
         default: false
         type: boolean
