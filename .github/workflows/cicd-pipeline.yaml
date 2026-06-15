@@ -1,23 +1,34 @@
 # Fork-only publish: Docker images to GHCR; dev Helm charts to gh-pages/dev/ (release charts use gh-pages root).
+# Manual run: check Build and/or Deploy. Push (commit): Build only.
 # Upstream (Netcracker/qubership-colly) always builds in dry-run and never publishes from this workflow.
 name: "Build"
+
+run-name: >-
+  ${{
+    github.event_name == 'push' && format('Build from {0}', github.ref_name)
+    || (github.event_name == 'workflow_dispatch' && inputs.deploy && !inputs.build
+        && format('Deploy from {0}', inputs.deploy-ref || github.ref_name))
+    || (github.event_name == 'workflow_dispatch' && inputs.build && inputs.deploy
+        && format('Build & Deploy from {0}', inputs.deploy-ref || github.ref_name))
+    || format('Build from {0}', github.ref_name)
+  }}
 
 on:
   workflow_dispatch:
     inputs:
-      dry-run:
-        description: 'Skip pushing Docker images to GHCR (fork only; upstream never publishes from this workflow)'
+      build:
+        description: 'Build and publish Docker images + Helm chart'
         required: false
         default: true
         type: boolean
       deploy:
-        description: 'Deploy to EKS after publish (fork, manual run only; requires dry-run off)'
+        description: 'Deploy to EKS (fork, manual run only)'
         required: false
         default: false
         type: boolean
       deploy-ref:
         description: >-
-          Branch or tag to deploy when deploy is on. Empty = current branch (github.ref_name).
+          Branch or tag to deploy when Deploy is on. Empty = current branch (github.ref_name).
         required: false
         default: ''
         type: string
@@ -31,11 +42,25 @@ permissions:
   pull-requests: read
 
 jobs:
+  validate-inputs:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate workflow inputs
+        shell: bash
+        run: |
+          if [ "${{ inputs.build }}" != "true" ] && [ "${{ inputs.deploy }}" != "true" ]; then
+            echo "::error::Select Build and/or Deploy"
+            exit 1
+          fi
+
   conventional-commits:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
     uses: ./.github/workflows/pr-conventional-commits.yaml
     secrets: inherit
 
   link-check:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
     uses: ./.github/workflows/link-checker.yaml
     secrets: inherit
 
@@ -46,6 +71,7 @@ jobs:
   #    full_scan: false
 
   mvn-build:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
     needs:
       - conventional-commits
       - link-check
@@ -74,6 +100,7 @@ jobs:
           maven-token: ${{ secrets.GITHUB_TOKEN }}
 
   prepare-metadata:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
     needs: mvn-build
     name: "Prepare Metadata"
     runs-on: ubuntu-latest
@@ -139,6 +166,7 @@ jobs:
 
   build:
     name: Build Docker Images
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
     needs: [prepare-metadata]
     runs-on: ubuntu-latest
     permissions:
@@ -153,7 +181,7 @@ jobs:
         uses: netcracker/qubership-workflow-hub/actions/docker-action@v2.0.5
         with:
           ref: ${{ github.ref }}
-          dry-run: ${{ github.event.repository.fork != true || (github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+          dry-run: ${{ github.event.repository.fork != true || (github.event_name == 'workflow_dispatch' && inputs.build != true) }}
           download-artifact: true
           download-artifact-path: '.'
           download-artifact-merge-multiple: true
@@ -167,7 +195,7 @@ jobs:
   publish-helm-chart:
     name: Publish Helm Chart
     needs: [build, prepare-metadata]
-    if: github.event.repository.fork == true && !(github.event_name == 'workflow_dispatch' && inputs.dry-run)
+    if: github.event.repository.fork == true && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -282,12 +310,15 @@ jobs:
 
   deploy:
     name: Deploy to EKS
-    needs: publish-helm-chart
+    needs: [publish-helm-chart]
     if: >-
-      github.event.repository.fork == true
+      always()
+      && !cancelled()
+      && !failure()
+      && github.event.repository.fork == true
       && github.event_name == 'workflow_dispatch'
       && inputs.deploy
-      && !inputs.dry-run
+      && (inputs.build != true || needs.publish-helm-chart.result == 'success')
     uses: ./.github/workflows/deploy.yaml
     with:
       ref: ${{ inputs.deploy-ref || github.ref_name }}

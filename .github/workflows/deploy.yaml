@@ -2,6 +2,8 @@
 # Standalone: workflow_dispatch. From Build pipeline: workflow_call (see cicd-pipeline.yaml).
 name: Deploy Colly
 
+run-name: Deploy from ${{ inputs.ref }}
+
 on:
   workflow_dispatch:
     inputs:

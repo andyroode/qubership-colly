@@ -11,9 +11,11 @@
 # image-tag — optional Docker tag override (leave empty to use refs from the chart)
 # helm-dry-run — render manifests only, do not apply
 #
-# Build workflow (cicd-pipeline.yaml) calls deploy.yaml when:
-# deploy=true, dry-run=false (manual run on fork only)
-# deploy-ref — branch or tag; empty = current branch
+# Build workflow (cicd-pipeline.yaml) manual run:
+#   Build — build and publish images + dev Helm chart
+#   Deploy — deploy to EKS (optionally after Build)
+#   deploy-ref — branch or tag for Deploy; empty = current branch
+# Push (commit) runs Build only.
 #
 # ── Secrets (substituted at deploy time only) ────────────────────────────────
 # Names must match ${...} placeholders in charts/qubership-colly/values.yaml
