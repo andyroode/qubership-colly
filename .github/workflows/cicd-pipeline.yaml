@@ -1,4 +1,4 @@
-# Fork-only publish: Docker images to GHCR; dev Helm charts to gh-pages/dev/ (release charts use gh-pages root).
+# Fork-only publish: Docker images to GHCR; image names/tags in charts/qubership-colly/values.yaml on branch builds.
 # Manual run: check Build and/or Deploy. Push (commit): Build only.
 # Upstream (Netcracker/qubership-colly) always builds in dry-run and never publishes from this workflow.
 name: "Build"
@@ -192,8 +192,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  publish-helm-chart:
-    name: Publish Helm Chart
+  update-chart-values:
+    name: Update Chart Image Tags
     needs: [build, prepare-metadata]
     if: github.event.repository.fork == true && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build))
     runs-on: ubuntu-latest
@@ -206,8 +206,7 @@ jobs:
           ref: ${{ github.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update chart values and package
-        id: update_chart
+      - name: Update chart image names and tags
         uses: netcracker/qubership-workflow-hub/actions/charts-values-update-action@v2.1.2
         with:
           release-version: ${{ needs.prepare-metadata.outputs.image_tag }}
@@ -215,7 +214,7 @@ jobs:
           config-file: .github/helm-chart-dev-config.yaml
           create-release-branch: false
           version-replace-method: parse
-          package-charts: true
+          package-charts: false
           publish-charts: false
           default-tag: latest
         env:
@@ -246,71 +245,9 @@ jobs:
           git push origin "HEAD:${GITHUB_REF_NAME}"
           echo "Committed and pushed ${values_file} to ${GITHUB_REF_NAME}"
 
-      - name: Setup Helm
-        uses: azure/setup-helm@v4
-
-      - name: Publish Helm chart to gh-pages
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CHART_VERSION: ${{ needs.prepare-metadata.outputs.chart_version }}
-          IMAGE_TAG: ${{ needs.prepare-metadata.outputs.image_tag }}
-          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          packages=(.cr-release-packages/*.tgz)
-          if [ "${#packages[@]}" -eq 0 ]; then
-            echo "::error::No packaged chart .tgz found"
-            exit 1
-          fi
-
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          pages_dir=$(mktemp -d)
-          if git ls-remote --exit-code --heads "${remote}" gh-pages >/dev/null 2>&1; then
-            git clone --depth 1 --branch gh-pages "${remote}" "${pages_dir}"
-          else
-            git init -b gh-pages "${pages_dir}"
-          fi
-
-          dev_dir="${pages_dir}/dev"
-          mkdir -p "${dev_dir}"
-          new_package="${packages[0]}"
-          chart_package=$(basename "${new_package}")
-          existing_package="${dev_dir}/${chart_package}"
-
-          if [ -f "${existing_package}" ] && cmp -s "${new_package}" "${existing_package}"; then
-            echo "Chart ${chart_package} unchanged — skip gh-pages push (no new GitHub Pages deployment)"
-            exit 0
-          fi
-
-          cp -f "${new_package}" "${existing_package}"
-
-          dev_url="${PAGES_URL}/dev"
-          if [ -f "${dev_dir}/index.yaml" ]; then
-            helm repo index "${dev_dir}" --url "${dev_url}" --merge "${dev_dir}/index.yaml"
-          else
-            helm repo index "${dev_dir}" --url "${dev_url}"
-          fi
-
-          cd "${pages_dir}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add dev/
-          if git diff --staged --quiet; then
-            echo "No changes to publish on gh-pages/dev"
-            exit 0
-          fi
-          git commit -m "$(cat <<EOF
-          chart: publish dev/qubership-colly ${CHART_VERSION} (${GITHUB_REF_NAME}, images:${IMAGE_TAG})
-          EOF
-          )"
-          git push "${remote}" gh-pages
-          echo "Published dev chart ${CHART_VERSION} to gh-pages/dev (${dev_url}/${chart_package})"
-
   deploy:
     name: Deploy to EKS
-    needs: [publish-helm-chart]
+    needs: [update-chart-values]
     if: >-
       always()
       && !cancelled()
@@ -318,7 +255,7 @@ jobs:
       && github.event.repository.fork == true
       && github.event_name == 'workflow_dispatch'
       && inputs.deploy
-      && (inputs.build != true || needs.publish-helm-chart.result == 'success')
+      && (inputs.build != true || needs.update-chart-values.result == 'success')
     uses: ./.github/workflows/deploy.yaml
     with:
       ref: ${{ inputs.deploy-ref || github.ref_name }}
