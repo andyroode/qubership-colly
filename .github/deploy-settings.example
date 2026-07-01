@@ -2,17 +2,16 @@
 # Settings → Secrets and variables → Actions
 #
 # ── Deploy Colly workflow inputs ─────────────────────────────────────────────
-# ref — branch or Docker/chart tag (single field):
-#   Branch examples: main, feature/my-fix  → chart 0.0.0-latest / 0.0.0-feature-my-fix
-#   Tag examples:    latest, feature-my-fix → chart 0.0.0-<tag>
+# ref — branch or tag to checkout (chart source: charts/qubership-colly/):
+#   Branch examples: main, feature/my-fix
+#   Tag examples:    latest, feature-my-fix
 #   Branch if value is "main" or contains "/"; otherwise treated as a tag.
-#   Chart source: https://<owner>.github.io/<repo>/dev
 #
-# image-tag — optional Docker tag override (leave empty to use refs from the chart)
+# image-tag — optional Docker tag override (leave empty to use refs from values.yaml)
 # helm-dry-run — render manifests only, do not apply
 #
 # Build workflow (cicd-pipeline.yaml) manual run:
-#   Build — build and publish images + dev Helm chart
+#   Build — build and publish Docker images, update chart values.yaml
 #   Deploy — deploy to EKS (optionally after Build)
 #   deploy-ref — branch or tag for Deploy; empty = current branch
 # Push (commit) runs Build only.

@@ -1,4 +1,4 @@
-# Deploy dev Helm chart (gh-pages/dev) to EKS.
+# Deploy Helm chart from charts/qubership-colly/ to EKS.
 # Standalone: workflow_dispatch. From Build pipeline: workflow_call (see cicd-pipeline.yaml).
 name: Deploy Colly
 
@@ -9,16 +9,16 @@ on:
     inputs:
       ref:
         description: >-
-          Branch or Docker/chart tag to deploy.
-          Branch: main, feature/my-fix (normalized to feature-my-fix).
-          Tag: latest, main, feature-my-fix (used as-is; chart version 0.0.0-<tag>).
+          Branch or tag to checkout (chart source and default image tag).
+          Branch: main, feature/my-fix (normalized to feature-my-fix for image tag).
+          Tag: latest, feature-my-fix (used as-is for image tag).
         required: true
         type: string
         default: main
       image-tag:
         description: >-
           Docker image tag override for all Colly services (ghcr.io/<owner>/<service>:<tag>).
-          Leave empty to use image refs baked into the chart at publish time.
+          Leave empty to use image refs from charts/qubership-colly/values.yaml.
         required: false
         default: ''
         type: string
@@ -30,7 +30,7 @@ on:
   workflow_call:
     inputs:
       ref:
-        description: 'Branch or Docker/chart tag to deploy'
+        description: 'Branch or tag to checkout'
         required: true
         type: string
       image-tag:
@@ -49,6 +49,7 @@ env:
   COLLY_INSTALL_NAMESPACE: qubership-colly-test
   COLLY_UI_INGRESS_NAME: ui-service-http
   COLLY_UI_INGRESS_HEALTH_PATH: /q/health/live
+  CHART_PATH: charts/qubership-colly
 
 permissions:
   contents: read
@@ -72,6 +73,11 @@ jobs:
           kubectl version --client
           helm version
           aws --version
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -117,8 +123,8 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve chart version from ref
-        id: chart
+      - name: Resolve deploy parameters
+        id: deploy
         shell: bash
         env:
           REF: ${{ inputs.ref }}
@@ -127,6 +133,14 @@ jobs:
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           ref="${REF}"
+          chart_path="${GITHUB_WORKSPACE}/${CHART_PATH}"
+
+          if [ ! -f "${chart_path}/Chart.yaml" ]; then
+            echo "::error::Helm chart not found at ${chart_path}"
+            exit 1
+          fi
+
+          chart_version="$(awk '/^version:/ { print $2; exit }' "${chart_path}/Chart.yaml")"
 
           normalize_branch() {
             echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's|/|-|g' | sed 's|_|-|g'
@@ -144,52 +158,29 @@ jobs:
             image_tag="${ref}"
           fi
 
-          chart_version="0.0.0-${image_tag}"
-          dev_repo_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${{ github.event.repository.name }}/dev"
-
           echo "owner=${owner}" >> "$GITHUB_OUTPUT"
           echo "ref_kind=${ref_kind}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
           echo "chart_version=${chart_version}" >> "$GITHUB_OUTPUT"
-          echo "dev_repo_url=${dev_repo_url}" >> "$GITHUB_OUTPUT"
+          echo "chart_path=${chart_path}" >> "$GITHUB_OUTPUT"
 
           {
             echo "## Deploy parameters"
-            echo "- Input (\`${ref_kind}\`): \`${ref}\`"
-            echo "- Chart version: \`${chart_version}\`"
-            echo "- Dev Helm repo: \`${dev_repo_url}\`"
-            echo "- Image tag in chart: \`${image_tag}\`"
+            echo "- Checkout (\`${ref_kind}\`): \`${ref}\`"
+            echo "- Chart path: \`${CHART_PATH}\` (version \`${chart_version}\`)"
+            echo "- Default image tag from ref: \`${image_tag}\`"
             if [ -n "${IMAGE_TAG_INPUT}" ]; then
               echo "- Image tag override: \`${IMAGE_TAG_INPUT}\`"
               echo "  - \`ghcr.io/${owner}/envgene-inventory-service:${IMAGE_TAG_INPUT}\`"
               echo "  - \`ghcr.io/${owner}/environment-operational-service:${IMAGE_TAG_INPUT}\`"
               echo "  - \`ghcr.io/${owner}/ui-service:${IMAGE_TAG_INPUT}\`"
             else
-              echo "- Image tag override: _(none — use refs from published chart)_"
+              echo "- Image tag override: _(none — use refs from values.yaml)_"
             fi
             echo "- Namespace: \`${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
             echo "- Helm release: \`${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
             echo "- Helm dry-run: \`${{ inputs.helm-dry-run }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Fetch chart from gh-pages dev repo
-        shell: bash
-        env:
-          DEV_REPO_URL: ${{ steps.chart.outputs.dev_repo_url }}
-          CHART_VERSION: ${{ steps.chart.outputs.chart_version }}
-        run: |
-          set -euo pipefail
-          chart_dir="$(mktemp -d)"
-          echo "Adding Helm repo ${DEV_REPO_URL}"
-          helm repo add colly-dev "${DEV_REPO_URL}" --force-update
-          helm repo update colly-dev
-          echo "Pulling qubership-colly version ${CHART_VERSION}"
-          if ! helm pull colly-dev/qubership-colly --version "${CHART_VERSION}" --untar -d "${chart_dir}"; then
-            echo "::error::Chart qubership-colly:${CHART_VERSION} not found in ${DEV_REPO_URL}"
-            echo "Run Build for ref '${{ inputs.ref }}' with publish enabled first."
-            exit 1
-          fi
-          echo "CHART_PATH=${chart_dir}/qubership-colly" >> "$GITHUB_ENV"
 
       - name: Validate GitHub secrets
         shell: bash
@@ -238,8 +229,8 @@ jobs:
           REDIS_HOST_PASSWORD: ${{ secrets.REDIS_HOST_PASSWORD }}
         run: |
           set -euo pipefail
-          owner="${{ steps.chart.outputs.owner }}"
-          chart_path="${CHART_PATH:?Chart path not set — fetch step failed}"
+          owner="${{ steps.deploy.outputs.owner }}"
+          chart_path="${{ steps.deploy.outputs.chart_path }}"
           helm_set_args=(--set "NAMESPACE=${INSTALL_NAMESPACE}")
           if [ -n "${COLLY_CLOUD_PUBLIC_HOST}" ]; then
             helm_set_args+=(--set "CLOUD_PUBLIC_HOST=${COLLY_CLOUD_PUBLIC_HOST}")
@@ -262,7 +253,7 @@ jobs:
             < "${values_file}" > "${values_file}.tmp"
           mv "${values_file}.tmp" "${values_file}"
           echo "Applied secret placeholders in chart values"
-          echo "Deploying qubership-colly:${{ steps.chart.outputs.chart_version }} to namespace ${INSTALL_NAMESPACE}"
+          echo "Deploying ${CHART_PATH} (version ${{ steps.deploy.outputs.chart_version }}) to namespace ${INSTALL_NAMESPACE}"
           # shellcheck disable=SC2086
           helm upgrade --install "${HELM_RELEASE}" "${chart_path}" \
             --namespace "${INSTALL_NAMESPACE}" \
@@ -280,7 +271,7 @@ jobs:
           UI_INGRESS_NAME: ${{ vars.COLLY_UI_INGRESS_NAME || env.COLLY_UI_INGRESS_NAME }}
           UI_INGRESS_HEALTH_PATH: ${{ vars.COLLY_UI_INGRESS_HEALTH_PATH || env.COLLY_UI_INGRESS_HEALTH_PATH }}
           DEPLOY_REF: ${{ inputs.ref }}
-          CHART_VERSION: ${{ steps.chart.outputs.chart_version }}
+          CHART_VERSION: ${{ steps.deploy.outputs.chart_version }}
         run: |
           set -euo pipefail
 
@@ -288,7 +279,7 @@ jobs:
 
           echo "Colly deploy verification"
           echo "branch/tag=${DEPLOY_REF}"
-          echo "chart=${CHART_VERSION}"
+          echo "chart=${CHART_PATH}:${CHART_VERSION}"
           echo "namespace=${INSTALL_NAMESPACE}"
           echo ""
 
@@ -393,7 +384,7 @@ jobs:
           {
             echo "Deploy verification passed"
             echo "branch/tag=${DEPLOY_REF}"
-            echo "chart=${CHART_VERSION}"
+            echo "chart=${CHART_PATH}:${CHART_VERSION}"
             echo "namespace=${INSTALL_NAMESPACE}"
             echo "UI: ${public_url}"
           } >> "$GITHUB_STEP_SUMMARY"
