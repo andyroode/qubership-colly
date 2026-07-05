@@ -85,7 +85,8 @@ jobs:
 
           subject="$(git log -1 --format=%s)"
           commit_type=""
-          if [[ "${subject}" =~ ^([a-zA-Z_]+)(\([^)]+\))?!?:[[:space:]] ]]; then
+          cc_regex='^([a-zA-Z_]+)(\([^)]+\))?!?:[[:space:]]'
+          if [[ "${subject}" =~ ${cc_regex} ]]; then
             commit_type="$(echo "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
           fi
 
