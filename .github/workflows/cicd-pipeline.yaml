@@ -134,6 +134,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   conventional-commits:
+    name: Conventional Commits
     needs: [validate-inputs]
     if: >-
       always()
@@ -145,6 +146,7 @@ jobs:
     secrets: inherit
 
   link-check:
+    name: Link Check
     needs: [validate-inputs]
     if: >-
       always()
