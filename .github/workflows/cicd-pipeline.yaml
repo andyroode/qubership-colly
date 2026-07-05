@@ -1,6 +1,9 @@
-# Fork-only publish: Docker images to GHCR; image names/tags in charts/qubership-colly/values.yaml on branch builds.
-# Manual run: check Build and/or Deploy. Push (commit): Build only.
-# Upstream (Netcracker/qubership-colly) always builds in dry-run and never publishes from this workflow.
+# Publish Docker images to GHCR; image names/tags in charts/qubership-colly/values.yaml on branch builds.
+# Manual run: check Build and/or Deploy. Push (commit): build gated by conventional commit type.
+# Push build policy (conventional commits, subject line):
+#   feat, fix, refactor, build, config, ci, perf, test, breaking → Maven + Docker + chart update
+#   docs, chore, style → skip Maven/Docker/chart (link-check + commit format still run)
+#   [skip ci] / [ci skip] / [no ci] → GitHub skips the entire workflow (native)
 name: "Build"
 
 run-name: >-
@@ -43,23 +46,90 @@ permissions:
 
 jobs:
   validate-inputs:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    outputs:
+      build_required: ${{ steps.validate.outputs.build_required }}
+      commit_type: ${{ steps.validate.outputs.commit_type }}
     steps:
-      - name: Validate workflow inputs
+      - name: Checkout
+        if: github.event_name == 'push'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+
+      - name: Validate Inputs
+        id: validate
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BUILD: ${{ inputs.build }}
+          INPUT_DEPLOY: ${{ inputs.deploy }}
         run: |
-          if [ "${{ inputs.build }}" != "true" ] && [ "${{ inputs.deploy }}" != "true" ]; then
-            echo "::error::Select Build and/or Deploy"
-            exit 1
+          set -euo pipefail
+
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ "${INPUT_BUILD}" != "true" ] && [ "${INPUT_DEPLOY}" != "true" ]; then
+              echo "::error::Select Build and/or Deploy"
+              exit 1
+            fi
+            echo "build_required=${INPUT_BUILD}" >> "$GITHUB_OUTPUT"
+            echo "commit_type=manual" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Build decision"
+              echo "- Trigger: manual (\`workflow_dispatch\`)"
+              echo "- Build: **${INPUT_BUILD}**"
+              echo "- Deploy: **${INPUT_DEPLOY}**"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
 
+          subject="$(git log -1 --format=%s)"
+          commit_type=""
+          if [[ "${subject}" =~ ^([a-zA-Z_]+)(\([^)]+\))?!?:[[:space:]] ]]; then
+            commit_type="$(echo "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+          fi
+
+          case "${commit_type}" in
+            feature) commit_type="feat" ;;
+            doc|documentation) commit_type="docs" ;;
+          esac
+
+          skip_types="docs chore style"
+          build_required="true"
+          if [ -n "${commit_type}" ]; then
+            for skip_type in ${skip_types}; do
+              if [ "${commit_type}" = "${skip_type}" ]; then
+                build_required="false"
+                break
+              fi
+            done
+          else
+            echo "::warning::Subject is not conventional (type(scope): description); running full build"
+            commit_type="unknown"
+          fi
+
+          echo "build_required=${build_required}" >> "$GITHUB_OUTPUT"
+          echo "commit_type=${commit_type}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Build decision"
+            echo "- Subject: \`${subject}\`"
+            echo "- Commit type: \`${commit_type}\`"
+            echo "- Build required: **${build_required}**"
+            if [ "${build_required}" = "false" ]; then
+              echo "- Skipped jobs: Maven, Docker, chart update"
+              echo "- Types that skip build: \`docs\`, \`chore\`, \`style\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   conventional-commits:
+    needs: [validate-inputs]
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
     uses: ./.github/workflows/pr-conventional-commits.yaml
     secrets: inherit
 
   link-check:
+    needs: [validate-inputs]
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
     uses: ./.github/workflows/link-checker.yaml
     secrets: inherit
@@ -71,8 +141,11 @@ jobs:
   #    full_scan: false
 
   mvn-build:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
+    if: >-
+      (github.event_name == 'push' && needs.validate-inputs.outputs.build_required == 'true')
+      || (github.event_name == 'workflow_dispatch' && inputs.build)
     needs:
+      - validate-inputs
       - conventional-commits
       - link-check
       #- linters
@@ -86,7 +159,7 @@ jobs:
           - ui-service
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Check Docker version
         run: docker version
       - name: Build java
@@ -100,8 +173,12 @@ jobs:
           maven-token: ${{ secrets.GITHUB_TOKEN }}
 
   prepare-metadata:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
-    needs: mvn-build
+    if: >-
+      (github.event_name == 'push' && needs.validate-inputs.outputs.build_required == 'true')
+      || (github.event_name == 'workflow_dispatch' && inputs.build)
+    needs:
+      - validate-inputs
+      - mvn-build
     name: "Prepare Metadata"
     runs-on: ubuntu-latest
     permissions:
@@ -115,7 +192,7 @@ jobs:
       chart_version: "${{ steps.calculate_image_tag.outputs.chart_version }}"
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Load Docker Configuration
         id: load_component
@@ -166,8 +243,12 @@ jobs:
 
   build:
     name: Build Docker Images
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
-    needs: [prepare-metadata]
+    if: >-
+      (github.event_name == 'push' && needs.validate-inputs.outputs.build_required == 'true')
+      || (github.event_name == 'workflow_dispatch' && inputs.build)
+    needs:
+      - validate-inputs
+      - prepare-metadata
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -181,7 +262,7 @@ jobs:
         uses: netcracker/qubership-workflow-hub/actions/docker-action@v2.0.5
         with:
           ref: ${{ github.ref }}
-          dry-run: ${{ github.event.repository.fork != true || (github.event_name == 'workflow_dispatch' && inputs.build != true) }}
+          dry-run: false
           download-artifact: true
           download-artifact-path: '.'
           download-artifact-merge-multiple: true
@@ -194,14 +275,16 @@ jobs:
 
   update-chart-values:
     name: Update Chart Image Tags
-    needs: [build, prepare-metadata]
-    if: github.event.repository.fork == true && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build))
+    needs: [validate-inputs, build, prepare-metadata]
+    if: >-
+      (github.event_name == 'push' && needs.validate-inputs.outputs.build_required == 'true')
+      || (github.event_name == 'workflow_dispatch' && inputs.build)
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -247,12 +330,11 @@ jobs:
 
   deploy:
     name: Deploy to EKS
-    needs: [update-chart-values]
+    needs: [validate-inputs, update-chart-values]
     if: >-
       always()
       && !cancelled()
       && !failure()
-      && github.event.repository.fork == true
       && github.event_name == 'workflow_dispatch'
       && inputs.deploy
       && (inputs.build != true || needs.update-chart-values.result == 'success')
