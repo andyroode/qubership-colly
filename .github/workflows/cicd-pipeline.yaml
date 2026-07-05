@@ -1,9 +1,11 @@
 # Publish Docker images to GHCR; image names/tags in charts/qubership-colly/values.yaml on branch builds.
 # Manual run: check Build and/or Deploy. Push (commit): build gated by conventional commit type.
-# Push build policy (conventional commits, subject line):
-#   feat, fix, refactor, build, config, ci, perf, test, breaking → Maven + Docker + chart update
-#   docs, chore, style → skip Maven/Docker/chart and quality gates
-#   non-conventional subject → skip Maven/Docker/chart and quality gates (use type(scope): description)
+# Push pipeline order:
+#   1. validate-inputs — commit type decides build vs skip
+#   2. conventional-commits + link-check — in parallel (push, after step 1)
+#   3. Maven, Docker, chart update — when build is required
+# Build types: feat, fix, refactor, build, config, ci, perf, test, breaking
+# Skip build (workflow succeeds): docs, chore, style
 #   [skip ci] / [ci skip] / [no ci] → GitHub skips the entire workflow (native)
 name: "Build & Deploy"
 
@@ -103,52 +105,55 @@ jobs:
             doc|documentation) commit_type="docs" ;;
           esac
 
+          if [ -z "${commit_type}" ]; then
+            echo "::error::Could not parse commit type from: ${subject}"
+            exit 1
+          fi
+
           skip_types="docs chore style"
           build_required="true"
-          if [ -z "${commit_type}" ]; then
-            echo "::warning::Commit message is not conventional (type(scope): description); skipping build"
-            commit_type="unknown"
-            build_required="false"
-          else
-            for skip_type in ${skip_types}; do
-              if [ "${commit_type}" = "${skip_type}" ]; then
-                build_required="false"
-                break
-              fi
-            done
-          fi
+          for skip_type in ${skip_types}; do
+            if [ "${commit_type}" = "${skip_type}" ]; then
+              build_required="false"
+              break
+            fi
+          done
 
           echo "build_required=${build_required}" >> "$GITHUB_OUTPUT"
           echo "commit_type=${commit_type}" >> "$GITHUB_OUTPUT"
 
           {
-            echo "## Build decision"
+            echo "## Commit validation"
             echo "- Commit message: \`${subject}\`"
             echo "- Commit type: \`${commit_type}\`"
             echo "- Build required: **${build_required}**"
             if [ "${build_required}" = "false" ]; then
-              echo "- Skipped jobs: conventional-commits, link-check, Maven, Docker, chart update"
-              if [ "${commit_type}" = "unknown" ]; then
-                echo "- Reason: non-conventional commit message"
-              else
-                echo "- Reason: commit type \`${commit_type}\` (skip types: \`docs\`, \`chore\`, \`style\`)"
-              fi
+              echo "- Skipped jobs: Maven, Docker, chart update"
+              echo "- Reason: commit type \`${commit_type}\` (skip types: \`docs\`, \`chore\`, \`style\`)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   conventional-commits:
     needs: [validate-inputs]
     if: >-
-      (github.event_name == 'push' && needs.validate-inputs.outputs.build_required == 'true')
-      || (github.event_name == 'workflow_dispatch' && inputs.build)
+      always()
+      && !failure()
+      && !cancelled()
+      && github.event_name == 'push'
+      && needs.validate-inputs.result == 'success'
     uses: ./.github/workflows/pr-conventional-commits.yaml
     secrets: inherit
 
   link-check:
     needs: [validate-inputs]
     if: >-
-      (github.event_name == 'push' && needs.validate-inputs.outputs.build_required == 'true')
-      || (github.event_name == 'workflow_dispatch' && inputs.build)
+      always()
+      && !failure()
+      && !cancelled()
+      && (
+        (github.event_name == 'push' && needs.validate-inputs.result == 'success')
+        || (github.event_name == 'workflow_dispatch' && inputs.build)
+      )
     uses: ./.github/workflows/link-checker.yaml
     secrets: inherit
 
@@ -160,8 +165,22 @@ jobs:
 
   mvn-build:
     if: >-
-      (github.event_name == 'push' && needs.validate-inputs.outputs.build_required == 'true')
-      || (github.event_name == 'workflow_dispatch' && inputs.build)
+      always()
+      && !failure()
+      && !cancelled()
+      && (
+        (
+          github.event_name == 'push'
+          && needs.validate-inputs.outputs.build_required == 'true'
+          && needs.conventional-commits.result == 'success'
+          && needs.link-check.result == 'success'
+        )
+        || (
+          github.event_name == 'workflow_dispatch'
+          && inputs.build
+          && needs.link-check.result == 'success'
+        )
+      )
     needs:
       - validate-inputs
       - conventional-commits
