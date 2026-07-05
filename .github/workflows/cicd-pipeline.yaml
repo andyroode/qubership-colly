@@ -2,8 +2,8 @@
 # Manual run: check Build and/or Deploy. Push (commit): build gated by conventional commit type.
 # Push build policy (conventional commits, subject line):
 #   feat, fix, refactor, build, config, ci, perf, test, breaking → Maven + Docker + chart update
-#   docs, chore, style → skip Maven/Docker/chart (link-check + commit format still run)
-#   non-conventional subject → skip Maven/Docker/chart (use type(scope): description)
+#   docs, chore, style → skip Maven/Docker/chart and quality gates
+#   non-conventional subject → skip Maven/Docker/chart and quality gates (use type(scope): description)
 #   [skip ci] / [ci skip] / [no ci] → GitHub skips the entire workflow (native)
 name: "Build & Deploy"
 
@@ -127,7 +127,7 @@ jobs:
             echo "- Commit type: \`${commit_type}\`"
             echo "- Build required: **${build_required}**"
             if [ "${build_required}" = "false" ]; then
-              echo "- Skipped jobs: Maven, Docker, chart update"
+              echo "- Skipped jobs: conventional-commits, link-check, Maven, Docker, chart update"
               if [ "${commit_type}" = "unknown" ]; then
                 echo "- Reason: non-conventional commit message"
               else
@@ -138,13 +138,17 @@ jobs:
 
   conventional-commits:
     needs: [validate-inputs]
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
+    if: >-
+      (github.event_name == 'push' && needs.validate-inputs.outputs.build_required == 'true')
+      || (github.event_name == 'workflow_dispatch' && inputs.build)
     uses: ./.github/workflows/pr-conventional-commits.yaml
     secrets: inherit
 
   link-check:
     needs: [validate-inputs]
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
+    if: >-
+      (github.event_name == 'push' && needs.validate-inputs.outputs.build_required == 'true')
+      || (github.event_name == 'workflow_dispatch' && inputs.build)
     uses: ./.github/workflows/link-checker.yaml
     secrets: inherit
 
