@@ -3,8 +3,9 @@
 # Push build policy (conventional commits, subject line):
 #   feat, fix, refactor, build, config, ci, perf, test, breaking → Maven + Docker + chart update
 #   docs, chore, style → skip Maven/Docker/chart (link-check + commit format still run)
+#   non-conventional subject → skip Maven/Docker/chart (use type(scope): description)
 #   [skip ci] / [ci skip] / [no ci] → GitHub skips the entire workflow (native)
-name: "Build"
+name: "Build & Deploy"
 
 run-name: >-
   ${{
@@ -36,6 +37,12 @@ on:
         default: ''
         type: string
   push:
+env:
+  COLLY_EKS_CLUSTER: Qubership-pioneer
+  COLLY_INSTALL_NAMESPACE: qubership-colly-test
+  COLLY_UI_INGRESS_NAME: ui-service-http
+  COLLY_UI_INGRESS_HEALTH_PATH: /q/health/live
+  CHART_PATH: charts/qubership-colly
 permissions:
   contents: read
   packages: write
@@ -46,6 +53,7 @@ permissions:
 
 jobs:
   validate-inputs:
+    name: Validate Inputs
     runs-on: ubuntu-latest
     outputs:
       build_required: ${{ steps.validate.outputs.build_required }}
@@ -97,16 +105,17 @@ jobs:
 
           skip_types="docs chore style"
           build_required="true"
-          if [ -n "${commit_type}" ]; then
+          if [ -z "${commit_type}" ]; then
+            echo "::warning::Commit message is not conventional (type(scope): description); skipping build"
+            commit_type="unknown"
+            build_required="false"
+          else
             for skip_type in ${skip_types}; do
               if [ "${commit_type}" = "${skip_type}" ]; then
                 build_required="false"
                 break
               fi
             done
-          else
-            echo "::warning::Subject is not conventional (type(scope): description); running full build"
-            commit_type="unknown"
           fi
 
           echo "build_required=${build_required}" >> "$GITHUB_OUTPUT"
@@ -114,12 +123,16 @@ jobs:
 
           {
             echo "## Build decision"
-            echo "- Subject: \`${subject}\`"
+            echo "- Commit message: \`${subject}\`"
             echo "- Commit type: \`${commit_type}\`"
             echo "- Build required: **${build_required}**"
             if [ "${build_required}" = "false" ]; then
               echo "- Skipped jobs: Maven, Docker, chart update"
-              echo "- Types that skip build: \`docs\`, \`chore\`, \`style\`"
+              if [ "${commit_type}" = "unknown" ]; then
+                echo "- Reason: non-conventional commit message"
+              else
+                echo "- Reason: commit type \`${commit_type}\` (skip types: \`docs\`, \`chore\`, \`style\`)"
+              fi
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -339,9 +352,325 @@ jobs:
       && github.event_name == 'workflow_dispatch'
       && inputs.deploy
       && (inputs.build != true || needs.update-chart-values.result == 'success')
-    uses: ./.github/workflows/deploy.yaml
-    with:
-      ref: ${{ inputs.deploy-ref || github.ref_name }}
-      image-tag: ''
-      helm-dry-run: false
-    secrets: inherit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.0
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Verify tools
+        run: |
+          kubectl version --client
+          helm version
+          aws --version
+
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.deploy-ref || github.ref_name }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Configure kubeconfig for EKS
+        env:
+          EKS_CLUSTER: ${{ vars.TF_VAR_EKS_NEW_CLUSTERNAME || env.COLLY_EKS_CLUSTER }}
+        run: |
+          echo "EKS cluster: ${EKS_CLUSTER}"
+          aws eks update-kubeconfig \
+            --region "${{ vars.AWS_REGION || 'us-east-1' }}" \
+            --name "${EKS_CLUSTER}"
+
+      - name: Cluster healthcheck
+        env:
+          INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          echo "### Cluster connectivity"
+          kubectl cluster-info
+          echo "### Nodes"
+          kubectl get nodes -o wide
+          ready_nodes="$(kubectl get nodes -o json | jq '[.items[] | select(.status.conditions[]? | select(.type=="Ready" and .status=="True"))] | length')"
+          total_nodes="$(kubectl get nodes -o json | jq '.items | length')"
+          if [ "${ready_nodes}" -lt 1 ]; then
+            echo "::error::No Ready nodes in cluster (ready=${ready_nodes}, total=${total_nodes})"
+            exit 1
+          fi
+          echo "Ready nodes: ${ready_nodes}/${total_nodes}"
+          echo "### Namespace pre-check: ${INSTALL_NAMESPACE}"
+          if ! kubectl get namespace "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
+            echo "::error::Namespace ${INSTALL_NAMESPACE} does not exist. Create it before deploy."
+            exit 1
+          fi
+          phase="$(kubectl get namespace "${INSTALL_NAMESPACE}" -o jsonpath='{.status.phase}')"
+          echo "Namespace exists (phase=${phase})"
+          if [ "${phase}" != "Active" ]; then
+            echo "::error::Namespace ${INSTALL_NAMESPACE} is not Active"
+            exit 1
+          fi
+
+      - name: Resolve deploy parameters
+        id: deploy
+        shell: bash
+        env:
+          REF: ${{ inputs.deploy-ref || github.ref_name }}
+          IMAGE_TAG_INPUT: ''
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          ref="${REF}"
+          chart_path="${GITHUB_WORKSPACE}/${CHART_PATH}"
+
+          if [ ! -f "${chart_path}/Chart.yaml" ]; then
+            echo "::error::Helm chart not found at ${chart_path}"
+            exit 1
+          fi
+
+          chart_version="$(awk '/^version:/ { print $2; exit }' "${chart_path}/Chart.yaml")"
+
+          normalize_branch() {
+            echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's|/|-|g' | sed 's|_|-|g'
+          }
+
+          if [ "${ref}" = "main" ] || [[ "${ref}" == */* ]]; then
+            ref_kind="branch"
+            if [ "${ref}" = "main" ]; then
+              image_tag="latest"
+            else
+              image_tag=$(normalize_branch "${ref}")
+            fi
+          else
+            ref_kind="tag"
+            image_tag="${ref}"
+          fi
+
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
+          echo "ref_kind=${ref_kind}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+          echo "chart_version=${chart_version}" >> "$GITHUB_OUTPUT"
+          echo "chart_path=${chart_path}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Deploy parameters"
+            echo "- Checkout (\`${ref_kind}\`): \`${ref}\`"
+            echo "- Chart path: \`${CHART_PATH}\` (version \`${chart_version}\`)"
+            echo "- Default image tag from ref: \`${image_tag}\`"
+            echo "- Image tag override: _(none — use refs from values.yaml)_"
+            echo "- Namespace: \`${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
+            echo "- Helm release: \`${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}\`"
+            echo "- Helm dry-run: \`false\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate GitHub secrets
+        shell: bash
+        env:
+          PROJECT_GIT_REPO_URL_EXAMPLE: ${{ secrets.PROJECT_GIT_REPO_URL_EXAMPLE }}
+          GH_TOKEN_EXAMPLE: ${{ secrets.GH_TOKEN_EXAMPLE }}
+          K8S_KEYCLOAK_EXAMPLE: ${{ secrets.K8S_KEYCLOAK_EXAMPLE }}
+          REDIS_HOST_EXAMPLE: ${{ secrets.REDIS_HOST_EXAMPLE }}
+          REDIS_HOST_ADMIN: ${{ secrets.REDIS_HOST_ADMIN }}
+          REDIS_HOST_PASSWORD: ${{ secrets.REDIS_HOST_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            PROJECT_GIT_REPO_URL_EXAMPLE \
+            GH_TOKEN_EXAMPLE \
+            K8S_KEYCLOAK_EXAMPLE \
+            REDIS_HOST_EXAMPLE \
+            REDIS_HOST_ADMIN \
+            REDIS_HOST_PASSWORD
+          do
+            value="${!name:-}"
+            if [ -z "${value}" ]; then
+              echo "::error::Missing repository secret: ${name}"
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo "Configure secrets listed in .github/deploy-settings.example"
+            exit 1
+          fi
+
+      - name: Deploy Colly stack
+        env:
+          INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+          HELM_RELEASE: ${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+          IMAGE_TAG: ''
+          HELM_DRY_RUN: 'false'
+          COLLY_HELM_EXTRA_ARGS: ${{ vars.COLLY_HELM_EXTRA_ARGS }}
+          COLLY_CLOUD_PUBLIC_HOST: ${{ vars.COLLY_CLOUD_PUBLIC_HOST }}
+          PROJECT_GIT_REPO_URL_EXAMPLE: ${{ secrets.PROJECT_GIT_REPO_URL_EXAMPLE }}
+          GH_TOKEN_EXAMPLE: ${{ secrets.GH_TOKEN_EXAMPLE }}
+          K8S_KEYCLOAK_EXAMPLE: ${{ secrets.K8S_KEYCLOAK_EXAMPLE }}
+          REDIS_HOST_EXAMPLE: ${{ secrets.REDIS_HOST_EXAMPLE }}
+          REDIS_HOST_ADMIN: ${{ secrets.REDIS_HOST_ADMIN }}
+          REDIS_HOST_PASSWORD: ${{ secrets.REDIS_HOST_PASSWORD }}
+        run: |
+          set -euo pipefail
+          owner="${{ steps.deploy.outputs.owner }}"
+          chart_path="${{ steps.deploy.outputs.chart_path }}"
+          helm_set_args=(--set "NAMESPACE=${INSTALL_NAMESPACE}")
+          if [ -n "${COLLY_CLOUD_PUBLIC_HOST}" ]; then
+            helm_set_args+=(--set "CLOUD_PUBLIC_HOST=${COLLY_CLOUD_PUBLIC_HOST}")
+          fi
+          image_set_args=()
+          if [ -n "${IMAGE_TAG}" ]; then
+            image_set_args+=(
+              --set "colly.envgeneInventoryService.image=ghcr.io/${owner}/envgene-inventory-service:${IMAGE_TAG}"
+              --set "colly.environmentOperationalService.image=ghcr.io/${owner}/environment-operational-service:${IMAGE_TAG}"
+              --set "colly.uiService.image=ghcr.io/${owner}/ui-service:${IMAGE_TAG}"
+            )
+          fi
+          dry_run_arg=()
+          if [ "${HELM_DRY_RUN}" = "true" ]; then
+            dry_run_arg=(--dry-run)
+          fi
+          values_file="${chart_path}/values.yaml"
+          envsubst \
+            '${PROJECT_GIT_REPO_URL_EXAMPLE} ${GH_TOKEN_EXAMPLE} ${K8S_KEYCLOAK_EXAMPLE} ${REDIS_HOST_EXAMPLE} ${REDIS_HOST_ADMIN} ${REDIS_HOST_PASSWORD}' \
+            < "${values_file}" > "${values_file}.tmp"
+          mv "${values_file}.tmp" "${values_file}"
+          echo "Applied secret placeholders in chart values"
+          echo "Deploying ${CHART_PATH} (version ${{ steps.deploy.outputs.chart_version }}) to namespace ${INSTALL_NAMESPACE}"
+          # shellcheck disable=SC2086
+          helm upgrade --install "${HELM_RELEASE}" "${chart_path}" \
+            --namespace "${INSTALL_NAMESPACE}" \
+            --wait \
+            --timeout 10m \
+            "${dry_run_arg[@]}" \
+            "${helm_set_args[@]}" \
+            "${image_set_args[@]}" \
+            ${COLLY_HELM_EXTRA_ARGS}
+
+      - name: Deployment healthcheck
+        env:
+          INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+          UI_INGRESS_NAME: ${{ vars.COLLY_UI_INGRESS_NAME || env.COLLY_UI_INGRESS_NAME }}
+          UI_INGRESS_HEALTH_PATH: ${{ vars.COLLY_UI_INGRESS_HEALTH_PATH || env.COLLY_UI_INGRESS_HEALTH_PATH }}
+          DEPLOY_REF: ${{ inputs.deploy-ref || github.ref_name }}
+          CHART_VERSION: ${{ steps.deploy.outputs.chart_version }}
+        run: |
+          set -euo pipefail
+
+          workloads=(envgene-inventory-service environment-operational-service ui-service)
+
+          echo "Colly deploy verification"
+          echo "branch/tag=${DEPLOY_REF}"
+          echo "chart=${CHART_PATH}:${CHART_VERSION}"
+          echo "namespace=${INSTALL_NAMESPACE}"
+          echo ""
+
+          pods_ok=true
+          for deploy in "${workloads[@]}"; do
+            if ! kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
+              echo "FAIL: deployment ${deploy} not found in namespace ${INSTALL_NAMESPACE}"
+              exit 1
+            fi
+            desired="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.spec.replicas}')"
+            ready="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.status.readyReplicas}')"
+            ready="${ready:-0}"
+            if [ "${ready}" != "${desired}" ] || [ "${desired}" -le 0 ]; then
+              kubectl rollout status "deployment/${deploy}" -n "${INSTALL_NAMESPACE}" --timeout=10m
+            fi
+          done
+
+          for deploy in "${workloads[@]}"; do
+            desired="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.spec.replicas}')"
+            ready="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.status.readyReplicas}')"
+            ready="${ready:-0}"
+            if [ "${ready}" != "${desired}" ] || [ "${desired}" -le 0 ]; then
+              pods_ok=false
+            fi
+          done
+          if [ "${pods_ok}" != "true" ]; then
+            echo "FAIL: one or more pods are not ready"
+            kubectl get pods -n "${INSTALL_NAMESPACE}" \
+              -l 'app.kubernetes.io/name in (envgene-inventory-service,environment-operational-service,ui-service)' \
+              -o wide
+            exit 1
+          fi
+
+          echo "Pods:"
+          kubectl get pods -n "${INSTALL_NAMESPACE}" \
+            -l 'app.kubernetes.io/name in (envgene-inventory-service,environment-operational-service,ui-service)'
+          echo ""
+
+          echo "Ingress ${UI_INGRESS_NAME}:"
+          if ! kubectl get ingress "${UI_INGRESS_NAME}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
+            echo "FAIL: ingress ${UI_INGRESS_NAME} not found in namespace ${INSTALL_NAMESPACE}"
+            exit 1
+          fi
+
+          ingress_host=""
+          for attempt in $(seq 1 12); do
+            ingress_host="$(kubectl get ingress "${UI_INGRESS_NAME}" -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+            if [ -n "${ingress_host}" ]; then
+              break
+            fi
+            echo "  address pending (${attempt}/12)"
+            sleep 10
+          done
+          if [ -z "${ingress_host}" ]; then
+            echo "FAIL: ingress ${UI_INGRESS_NAME} has no load balancer hostname"
+            exit 1
+          fi
+
+          health_path="${UI_INGRESS_HEALTH_PATH#/}"
+          public_url="http://${ingress_host}/"
+          health_url="http://${ingress_host}/${health_path}"
+          echo "  address: ${ingress_host}"
+          echo ""
+
+          echo "HTTP probe:"
+          echo "  GET ${health_url}"
+          http_code=""
+          curl_time=""
+          for attempt in $(seq 1 12); do
+            curl_meta="$(curl -sS -o /dev/null -w '%{http_code} %{time_total}' \
+              --connect-timeout 10 --max-time 30 "${health_url}" || echo '000 0')"
+            http_code="${curl_meta%% *}"
+            curl_time="${curl_meta#* }"
+            if [ "${http_code}" = "200" ]; then
+              echo "  HTTP ${http_code} (${curl_time}s)"
+              break
+            fi
+            echo "  HTTP ${http_code:-000} (${attempt}/12)"
+            sleep 10
+          done
+          if [ "${http_code}" != "200" ]; then
+            echo "FAIL: ${health_url} returned HTTP ${http_code:-000}, expected 200"
+            exit 1
+          fi
+
+          not_ready="$(kubectl get pods -n "${INSTALL_NAMESPACE}" -o json \
+            | jq '[.items[] | select(.status.phase != "Running" and .status.phase != "Succeeded")] | length')"
+          if [ "${not_ready}" -gt 0 ]; then
+            echo "WARNING: ${not_ready} pod(s) not Running/Succeeded"
+            kubectl get pods -n "${INSTALL_NAMESPACE}" -o wide
+          fi
+
+          echo ""
+          echo "OK: all checks passed"
+          echo "UI: ${public_url}"
+
+          {
+            echo "Deploy verification passed"
+            echo "branch/tag=${DEPLOY_REF}"
+            echo "chart=${CHART_PATH}:${CHART_VERSION}"
+            echo "namespace=${INSTALL_NAMESPACE}"
+            echo "UI: ${public_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
