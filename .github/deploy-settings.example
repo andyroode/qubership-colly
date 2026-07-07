@@ -25,6 +25,9 @@
 # REDIS_HOST_EXAMPLE               Redis connection URL
 # REDIS_HOST_ADMIN                 Redis username
 # REDIS_HOST_PASSWORD              Redis password
+# COLLY_UI_HEALTHCHECK_USERNAME    Keycloak user for post-deploy environments API check
+# COLLY_UI_HEALTHCHECK_PASSWORD    Keycloak password for post-deploy environments API check
+# COLLY_UI_HEALTHCHECK_CLIENT_SECRET (optional) OIDC client secret when client is confidential
 #
 # ── Already used by deploy workflow ──────────────────────────────────────────
 # AWS_ACCESS_KEY_ID                (secret)
@@ -37,3 +40,5 @@
 # COLLY_CLOUD_PUBLIC_HOST          (variable, optional public ingress host)
 # COLLY_UI_INGRESS_NAME            (variable, default ui-service-http — ingress for post-deploy curl check)
 # COLLY_UI_INGRESS_HEALTH_PATH     (variable, default /q/health/live — path for curl check, no auth)
+# COLLY_UI_INGRESS_API_PATH        (variable, default /colly/v2/ui-service/environments — authenticated API check)
+# COLLY_UI_HEALTHCHECK_CLIENT_ID   (variable, default colly — OIDC client for password grant)

@@ -44,6 +44,8 @@ env:
   COLLY_INSTALL_NAMESPACE: qubership-colly-test
   COLLY_UI_INGRESS_NAME: ui-service-http
   COLLY_UI_INGRESS_HEALTH_PATH: /q/health/live
+  COLLY_UI_INGRESS_API_PATH: /colly/v2/ui-service/environments
+  COLLY_UI_HEALTHCHECK_CLIENT_ID: colly
   CHART_PATH: charts/qubership-colly
 permissions:
   contents: read
@@ -503,6 +505,8 @@ jobs:
           REDIS_HOST_EXAMPLE: ${{ secrets.REDIS_HOST_EXAMPLE }}
           REDIS_HOST_ADMIN: ${{ secrets.REDIS_HOST_ADMIN }}
           REDIS_HOST_PASSWORD: ${{ secrets.REDIS_HOST_PASSWORD }}
+          COLLY_UI_HEALTHCHECK_USERNAME: ${{ secrets.COLLY_UI_HEALTHCHECK_USERNAME }}
+          COLLY_UI_HEALTHCHECK_PASSWORD: ${{ secrets.COLLY_UI_HEALTHCHECK_PASSWORD }}
         run: |
           set -euo pipefail
           missing=0
@@ -512,7 +516,9 @@ jobs:
             K8S_KEYCLOAK_EXAMPLE \
             REDIS_HOST_EXAMPLE \
             REDIS_HOST_ADMIN \
-            REDIS_HOST_PASSWORD
+            REDIS_HOST_PASSWORD \
+            COLLY_UI_HEALTHCHECK_USERNAME \
+            COLLY_UI_HEALTHCHECK_PASSWORD
           do
             value="${!name:-}"
             if [ -z "${value}" ]; then
@@ -581,6 +587,12 @@ jobs:
           INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
           UI_INGRESS_NAME: ${{ vars.COLLY_UI_INGRESS_NAME || env.COLLY_UI_INGRESS_NAME }}
           UI_INGRESS_HEALTH_PATH: ${{ vars.COLLY_UI_INGRESS_HEALTH_PATH || env.COLLY_UI_INGRESS_HEALTH_PATH }}
+          UI_INGRESS_API_PATH: ${{ vars.COLLY_UI_INGRESS_API_PATH || env.COLLY_UI_INGRESS_API_PATH }}
+          UI_HEALTHCHECK_CLIENT_ID: ${{ vars.COLLY_UI_HEALTHCHECK_CLIENT_ID || env.COLLY_UI_HEALTHCHECK_CLIENT_ID }}
+          K8S_KEYCLOAK_EXAMPLE: ${{ secrets.K8S_KEYCLOAK_EXAMPLE }}
+          COLLY_UI_HEALTHCHECK_USERNAME: ${{ secrets.COLLY_UI_HEALTHCHECK_USERNAME }}
+          COLLY_UI_HEALTHCHECK_PASSWORD: ${{ secrets.COLLY_UI_HEALTHCHECK_PASSWORD }}
+          COLLY_UI_HEALTHCHECK_CLIENT_SECRET: ${{ secrets.COLLY_UI_HEALTHCHECK_CLIENT_SECRET }}
           DEPLOY_REF: ${{ inputs.deploy-ref || github.ref_name }}
           CHART_VERSION: ${{ steps.deploy.outputs.chart_version }}
         run: |
@@ -681,6 +693,68 @@ jobs:
             exit 1
           fi
 
+          api_path="${UI_INGRESS_API_PATH#/}"
+          api_url="http://${ingress_host}/${api_path}"
+          token_url="${K8S_KEYCLOAK_EXAMPLE%/}/protocol/openid-connect/token"
+          token_args=(
+            -sS -X POST "${token_url}"
+            --connect-timeout 10 --max-time 30
+            -d "grant_type=password"
+            -d "client_id=${UI_HEALTHCHECK_CLIENT_ID}"
+            -d "username=${COLLY_UI_HEALTHCHECK_USERNAME}"
+            -d "password=${COLLY_UI_HEALTHCHECK_PASSWORD}"
+          )
+          if [ -n "${COLLY_UI_HEALTHCHECK_CLIENT_SECRET:-}" ]; then
+            token_args+=(-d "client_secret=${COLLY_UI_HEALTHCHECK_CLIENT_SECRET}")
+          fi
+
+          echo ""
+          echo "Authenticated API probe:"
+          echo "  POST ${token_url}"
+          token_response="$(curl "${token_args[@]}" || true)"
+          access_token="$(echo "${token_response}" | jq -r '.access_token // empty')"
+          if [ -z "${access_token}" ]; then
+            token_error="$(echo "${token_response}" | jq -r '.error_description // .error // "unknown token error"')"
+            echo "FAIL: could not obtain access token (${token_error})"
+            exit 1
+          fi
+          echo "  access token obtained"
+
+          echo "  GET ${api_url}"
+          api_http_code=""
+          api_response_file="$(mktemp)"
+          for attempt in $(seq 1 12); do
+            api_http_code="$(curl -sS -o "${api_response_file}" -w '%{http_code}' \
+              --connect-timeout 10 --max-time 30 \
+              -H "Authorization: Bearer ${access_token}" \
+              -H "Accept: application/json" \
+              "${api_url}" || echo '000')"
+            if [ "${api_http_code}" = "200" ]; then
+              break
+            fi
+            echo "  HTTP ${api_http_code:-000} (${attempt}/12)"
+            sleep 10
+          done
+          if [ "${api_http_code}" != "200" ]; then
+            echo "FAIL: ${api_url} returned HTTP ${api_http_code:-000}, expected 200"
+            if [ -s "${api_response_file}" ]; then
+              head -c 500 "${api_response_file}" || true
+              echo ""
+            fi
+            rm -f "${api_response_file}"
+            exit 1
+          fi
+          if ! jq -e 'type == "array"' "${api_response_file}" >/dev/null 2>&1; then
+            echo "FAIL: ${api_url} did not return a JSON array"
+            head -c 500 "${api_response_file}" || true
+            echo ""
+            rm -f "${api_response_file}"
+            exit 1
+          fi
+          environment_count="$(jq 'length' "${api_response_file}")"
+          rm -f "${api_response_file}"
+          echo "  HTTP ${api_http_code} (environments: ${environment_count})"
+
           not_ready="$(kubectl get pods -n "${INSTALL_NAMESPACE}" -o json \
             | jq '[.items[] | select(.status.phase != "Running" and .status.phase != "Succeeded")] | length')"
           if [ "${not_ready}" -gt 0 ]; then
@@ -698,4 +772,5 @@ jobs:
             echo "chart=${CHART_PATH}:${CHART_VERSION}"
             echo "namespace=${INSTALL_NAMESPACE}"
             echo "UI: ${public_url}"
+            echo "environments API: ${api_url} (${environment_count} item(s))"
           } >> "$GITHUB_STEP_SUMMARY"
