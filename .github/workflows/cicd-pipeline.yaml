@@ -752,8 +752,20 @@ jobs:
             exit 1
           fi
           environment_count="$(jq 'length' "${api_response_file}")"
-          rm -f "${api_response_file}"
           echo "  HTTP ${api_http_code} (environments: ${environment_count})"
+          if [ "${environment_count}" -gt 0 ]; then
+            echo "  environments:"
+            {
+              printf '%s\t%s\t%s\n' "NAME" "ID" "STATUS"
+              jq -r '.[] | [.name, .id, .status] | @tsv' "${api_response_file}"
+            } | column -t -s $'\t' | sed 's/^/  /'
+          fi
+          environment_summary_table="$(jq -r '
+            ["| Name | ID | Status |", "| --- | --- | --- |"]
+            + [.[] | "| \(.name) | \(.id) | \(.status) |"]
+            | .[]
+          ' "${api_response_file}")"
+          rm -f "${api_response_file}"
 
           not_ready="$(kubectl get pods -n "${INSTALL_NAMESPACE}" -o json \
             | jq '[.items[] | select(.status.phase != "Running" and .status.phase != "Succeeded")] | length')"
@@ -773,4 +785,8 @@ jobs:
             echo "namespace=${INSTALL_NAMESPACE}"
             echo "UI: ${public_url}"
             echo "environments API: ${api_url} (${environment_count} item(s))"
+            if [ "${environment_count}" -gt 0 ]; then
+              echo ""
+              echo "${environment_summary_table}"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
