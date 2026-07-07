@@ -2,7 +2,7 @@
 # Manual run: check Build and/or Deploy. Push (commit): build gated by conventional commit type.
 # Push pipeline order:
 #   1. validate-inputs — commit type decides build vs skip
-#   2. conventional-commits + link-check — in parallel (push, after step 1)
+#   2. conventional-commits + link-check — in parallel (after step 1; link-check when build runs)
 #   3. Maven, Docker, chart update — when build is required
 # Build types: feat, fix, refactor, build, config, ci, perf, test, breaking
 # Skip build (workflow succeeds): docs, chore, style
@@ -142,7 +142,6 @@ jobs:
       always()
       && !failure()
       && !cancelled()
-      && github.event_name == 'push'
       && needs.validate-inputs.result == 'success'
     uses: ./.github/workflows/pr-conventional-commits.yaml
     secrets: inherit
@@ -182,6 +181,7 @@ jobs:
         || (
           github.event_name == 'workflow_dispatch'
           && inputs.build
+          && needs.conventional-commits.result == 'success'
           && needs.link-check.result == 'success'
         )
       )
