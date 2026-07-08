@@ -744,6 +744,11 @@ jobs:
             rm -f "${api_response_file}"
             exit 1
           fi
+          if jq -e '. == null' "${api_response_file}" >/dev/null 2>&1; then
+            echo "FAIL: ${api_url} returned null"
+            rm -f "${api_response_file}"
+            exit 1
+          fi
           if ! jq -e 'type == "array"' "${api_response_file}" >/dev/null 2>&1; then
             echo "FAIL: ${api_url} did not return a JSON array"
             head -c 500 "${api_response_file}" || true
@@ -752,19 +757,28 @@ jobs:
             exit 1
           fi
           environment_count="$(jq 'length' "${api_response_file}")"
-          echo "  HTTP ${api_http_code} (environments: ${environment_count})"
-          if [ "${environment_count}" -gt 0 ]; then
-            echo "  environments:"
-            {
-              printf '%s\t%s\t%s\n' "NAME" "ID" "STATUS"
-              jq -r '.[] | [.name, .id, .status] | @tsv' "${api_response_file}"
-            } | column -t -s $'\t' | sed 's/^/  /'
+          if [ "${environment_count}" -eq 0 ]; then
+            echo "FAIL: ${api_url} returned an empty environments list (count=0)"
+            rm -f "${api_response_file}"
+            exit 1
           fi
+          echo "  HTTP ${api_http_code} (environments: ${environment_count})"
+          echo "  environments:"
+          {
+            printf '%s\t%s\t%s\n' "NAME" "ID" "STATUS"
+            jq -r '.[] | [.name, .id, .status] | @tsv' "${api_response_file}"
+          } | column -t -s $'\t' | sed 's/^/  /'
           environment_summary_table="$(jq -r '
             ["| Name | ID | Status |", "| --- | --- | --- |"]
             + [.[] | "| \(.name) | \(.id) | \(.status) |"]
             | .[]
           ' "${api_response_file}")"
+          # TEMPORARY: remove after verifying deploy failure on environments check
+          if [ "${environment_count}" -eq 2 ]; then
+            echo "FAIL: test hook — environments count is 2 (remove this check after testing)"
+            rm -f "${api_response_file}"
+            exit 1
+          fi
           rm -f "${api_response_file}"
 
           not_ready="$(kubectl get pods -n "${INSTALL_NAMESPACE}" -o json \
@@ -785,8 +799,6 @@ jobs:
             echo "namespace=${INSTALL_NAMESPACE}"
             echo "UI: ${public_url}"
             echo "environments API: ${api_url} (${environment_count} item(s))"
-            if [ "${environment_count}" -gt 0 ]; then
-              echo ""
-              echo "${environment_summary_table}"
-            fi
+            echo ""
+            echo "${environment_summary_table}"
           } >> "$GITHUB_STEP_SUMMARY"
