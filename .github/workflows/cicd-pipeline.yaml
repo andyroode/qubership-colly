@@ -773,12 +773,6 @@ jobs:
             + [.[] | "| \(.name) | \(.id) | \(.status) |"]
             | .[]
           ' "${api_response_file}")"
-          # TEMPORARY: remove after verifying deploy failure on environments check
-          if [ "${environment_count}" -eq 2 ]; then
-            echo "FAIL: test hook — environments count is 2 (remove this check after testing)"
-            rm -f "${api_response_file}"
-            exit 1
-          fi
           rm -f "${api_response_file}"
 
           not_ready="$(kubectl get pods -n "${INSTALL_NAMESPACE}" -o json \
