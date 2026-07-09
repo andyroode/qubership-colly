@@ -39,6 +39,11 @@ on:
         default: ''
         type: string
   push:
+
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   COLLY_EKS_CLUSTER: Qubership-pioneer
   COLLY_INSTALL_NAMESPACE: qubership-colly-test
@@ -204,7 +209,7 @@ jobs:
       - name: Check Docker version
         run: docker version
       - name: Build java
-        uses: netcracker/qubership-workflow-hub/actions/maven-snapshot-deploy@main
+        uses: netcracker/qubership-workflow-hub/actions/maven-snapshot-deploy@768c088ef2adf0081dd97cff19dae2ef3ccab9b1 # main (pinned 2026-07-09)
         with:
           java-version: 21
           maven-command: clean install
@@ -239,7 +244,7 @@ jobs:
         id: load_component
         shell: bash
         run: |
-          verify=$(cat "$GITHUB_WORKSPACE/.github/docker-dev-config.json" | jq '
+          verify=$(cat "$GITHUB_WORKSPACE/.github/config/docker-dev-config.json" | jq '
             def verify_structure:
               .components as $components
               | .platforms as $platforms
@@ -250,12 +255,12 @@ jobs:
             | if . then true else false end
           ')
           if [ "${verify}" == "true" ]; then
-            echo "✅ $GITHUB_WORKSPACE/.github/docker-dev-config.json file is valid"
-            components=$(jq -c ".components" "$GITHUB_WORKSPACE/.github/docker-dev-config.json")
-            platforms=$(jq -c ".platforms" "$GITHUB_WORKSPACE/.github/docker-dev-config.json")
+            echo "✅ $GITHUB_WORKSPACE/.github/config/docker-dev-config.json file is valid"
+            components=$(jq -c ".components" "$GITHUB_WORKSPACE/.github/config/docker-dev-config.json")
+            platforms=$(jq -c ".platforms" "$GITHUB_WORKSPACE/.github/config/docker-dev-config.json")
           else
-            echo "❗ $GITHUB_WORKSPACE/.github/docker-dev-config.json file is invalid"
-            echo "❗ $GITHUB_WORKSPACE/.github/docker-dev-config.json file is invalid" >> $GITHUB_STEP_SUMMARY
+            echo "❗ $GITHUB_WORKSPACE/.github/config/docker-dev-config.json file is invalid"
+            echo "❗ $GITHUB_WORKSPACE/.github/config/docker-dev-config.json file is invalid" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
           echo "components=${components}" >> "$GITHUB_OUTPUT"
@@ -300,7 +305,7 @@ jobs:
         component: ${{ fromJson(needs.prepare-metadata.outputs.components) }}
     steps:
       - name: Docker
-        uses: netcracker/qubership-workflow-hub/actions/docker-action@v2.0.5
+        uses: netcracker/qubership-workflow-hub/actions/docker-action@396774180000abdb825cbf150b56cc59c6913db8 # v2.0.5
         with:
           ref: ${{ github.ref }}
           dry-run: false
@@ -331,11 +336,11 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update chart image names and tags
-        uses: netcracker/qubership-workflow-hub/actions/charts-values-update-action@v2.1.2
+        uses: netcracker/qubership-workflow-hub/actions/charts-values-update-action@5a557213e92e3d22d0292330c4817c82af6704d2 # v2.1.2
         with:
           release-version: ${{ needs.prepare-metadata.outputs.image_tag }}
           chart-version: ${{ needs.prepare-metadata.outputs.chart_version }}
-          config-file: .github/helm-chart-dev-config.yaml
+          config-file: .github/config/helm-chart-dev-config.yaml
           create-release-branch: false
           version-replace-method: parse
           package-charts: false
@@ -382,12 +387,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
         with:
           version: v1.32.0
 
       - name: Setup Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
 
       - name: Verify tools
         run: |
@@ -401,7 +406,7 @@ jobs:
           ref: ${{ inputs.deploy-ref || github.ref_name }}
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -527,11 +532,12 @@ jobs:
             fi
           done
           if [ "${missing}" -ne 0 ]; then
-            echo "Configure secrets listed in .github/deploy-settings.example"
+            echo "Configure secrets listed in .github/config/deploy-settings.example"
             exit 1
           fi
 
       - name: Deploy Colly stack
+        id: deploy_helm
         env:
           INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
           HELM_RELEASE: ${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
@@ -583,6 +589,7 @@ jobs:
             ${COLLY_HELM_EXTRA_ARGS}
 
       - name: Deployment healthcheck
+        id: healthcheck
         env:
           INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
           UI_INGRESS_NAME: ${{ vars.COLLY_UI_INGRESS_NAME || env.COLLY_UI_INGRESS_NAME }}
@@ -595,204 +602,44 @@ jobs:
           COLLY_UI_HEALTHCHECK_CLIENT_SECRET: ${{ secrets.COLLY_UI_HEALTHCHECK_CLIENT_SECRET }}
           DEPLOY_REF: ${{ inputs.deploy-ref || github.ref_name }}
           CHART_VERSION: ${{ steps.deploy.outputs.chart_version }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/build_deploy/deploy-healthcheck.sh"
+
+      - name: Rollback on failure
+        if: >-
+          always()
+          && steps.deploy_helm.outcome != 'skipped'
+          && (steps.deploy_helm.outcome == 'failure' || steps.healthcheck.outcome == 'failure')
+        env:
+          INSTALL_NAMESPACE: ${{ vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
+          HELM_RELEASE: ${{ vars.COLLY_HELM_RELEASE || vars.TF_VAR_COLLY_INSTALL_NAMESPACE || env.COLLY_INSTALL_NAMESPACE }}
         run: |
           set -euo pipefail
+          echo "Deploy or healthcheck failed — attempting Helm rollback"
 
-          workloads=(envgene-inventory-service environment-operational-service ui-service)
-
-          echo "Colly deploy verification"
-          echo "branch/tag=${DEPLOY_REF}"
-          echo "chart=${CHART_PATH}:${CHART_VERSION}"
-          echo "namespace=${INSTALL_NAMESPACE}"
-          echo ""
-
-          pods_ok=true
-          for deploy in "${workloads[@]}"; do
-            if ! kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
-              echo "FAIL: deployment ${deploy} not found in namespace ${INSTALL_NAMESPACE}"
-              exit 1
-            fi
-            desired="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
-              -o jsonpath='{.spec.replicas}')"
-            ready="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
-              -o jsonpath='{.status.readyReplicas}')"
-            ready="${ready:-0}"
-            if [ "${ready}" != "${desired}" ] || [ "${desired}" -le 0 ]; then
-              kubectl rollout status "deployment/${deploy}" -n "${INSTALL_NAMESPACE}" --timeout=10m
-            fi
-          done
-
-          for deploy in "${workloads[@]}"; do
-            desired="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
-              -o jsonpath='{.spec.replicas}')"
-            ready="$(kubectl get deployment "${deploy}" -n "${INSTALL_NAMESPACE}" \
-              -o jsonpath='{.status.readyReplicas}')"
-            ready="${ready:-0}"
-            if [ "${ready}" != "${desired}" ] || [ "${desired}" -le 0 ]; then
-              pods_ok=false
-            fi
-          done
-          if [ "${pods_ok}" != "true" ]; then
-            echo "FAIL: one or more pods are not ready"
-            kubectl get pods -n "${INSTALL_NAMESPACE}" \
-              -l 'app.kubernetes.io/name in (envgene-inventory-service,environment-operational-service,ui-service)' \
-              -o wide
-            exit 1
+          if ! helm status "${HELM_RELEASE}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
+            echo "No Helm release ${HELM_RELEASE} in namespace ${INSTALL_NAMESPACE}; nothing to roll back"
+            exit 0
           fi
 
-          echo "Pods:"
-          kubectl get pods -n "${INSTALL_NAMESPACE}" \
-            -l 'app.kubernetes.io/name in (envgene-inventory-service,environment-operational-service,ui-service)'
-          echo ""
-
-          echo "Ingress ${UI_INGRESS_NAME}:"
-          if ! kubectl get ingress "${UI_INGRESS_NAME}" -n "${INSTALL_NAMESPACE}" >/dev/null 2>&1; then
-            echo "FAIL: ingress ${UI_INGRESS_NAME} not found in namespace ${INSTALL_NAMESPACE}"
-            exit 1
+          revisions="$(helm history "${HELM_RELEASE}" -n "${INSTALL_NAMESPACE}" -o json | jq 'length')"
+          echo "Release ${HELM_RELEASE} has ${revisions} revision(s)"
+          if [ "${revisions}" -lt 2 ]; then
+            echo "::warning::Only ${revisions} revision(s) exist — no previous revision to roll back to (first install)."
+            echo "The failed release is kept for debugging. Uninstall manually if needed:"
+            echo "  helm uninstall ${HELM_RELEASE} -n ${INSTALL_NAMESPACE}"
+            {
+              echo "## Deploy failed — no rollback"
+              echo "Release \`${HELM_RELEASE}\` has only ${revisions} revision(s); nothing to roll back to."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
 
-          ingress_host=""
-          for attempt in $(seq 1 12); do
-            ingress_host="$(kubectl get ingress "${UI_INGRESS_NAME}" -n "${INSTALL_NAMESPACE}" \
-              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
-            if [ -n "${ingress_host}" ]; then
-              break
-            fi
-            echo "  address pending (${attempt}/12)"
-            sleep 10
-          done
-          if [ -z "${ingress_host}" ]; then
-            echo "FAIL: ingress ${UI_INGRESS_NAME} has no load balancer hostname"
-            exit 1
-          fi
-
-          health_path="${UI_INGRESS_HEALTH_PATH#/}"
-          public_url="http://${ingress_host}/"
-          health_url="http://${ingress_host}/${health_path}"
-          echo "  address: ${ingress_host}"
-          echo ""
-
-          echo "HTTP probe:"
-          echo "  GET ${health_url}"
-          http_code=""
-          curl_time=""
-          for attempt in $(seq 1 12); do
-            curl_meta="$(curl -sS -o /dev/null -w '%{http_code} %{time_total}' \
-              --connect-timeout 10 --max-time 30 "${health_url}" || echo '000 0')"
-            http_code="${curl_meta%% *}"
-            curl_time="${curl_meta#* }"
-            if [ "${http_code}" = "200" ]; then
-              echo "  HTTP ${http_code} (${curl_time}s)"
-              break
-            fi
-            echo "  HTTP ${http_code:-000} (${attempt}/12)"
-            sleep 10
-          done
-          if [ "${http_code}" != "200" ]; then
-            echo "FAIL: ${health_url} returned HTTP ${http_code:-000}, expected 200"
-            exit 1
-          fi
-
-          api_path="${UI_INGRESS_API_PATH#/}"
-          api_url="http://${ingress_host}/${api_path}"
-          token_url="${K8S_KEYCLOAK_EXAMPLE%/}/protocol/openid-connect/token"
-          token_args=(
-            -sS -X POST "${token_url}"
-            --connect-timeout 10 --max-time 30
-            -d "grant_type=password"
-            -d "client_id=${UI_HEALTHCHECK_CLIENT_ID}"
-            -d "username=${COLLY_UI_HEALTHCHECK_USERNAME}"
-            -d "password=${COLLY_UI_HEALTHCHECK_PASSWORD}"
-          )
-          if [ -n "${COLLY_UI_HEALTHCHECK_CLIENT_SECRET:-}" ]; then
-            token_args+=(-d "client_secret=${COLLY_UI_HEALTHCHECK_CLIENT_SECRET}")
-          fi
-
-          echo ""
-          echo "Authenticated API probe:"
-          echo "  POST ${token_url}"
-          token_response="$(curl "${token_args[@]}" || true)"
-          access_token="$(echo "${token_response}" | jq -r '.access_token // empty')"
-          if [ -z "${access_token}" ]; then
-            token_error="$(echo "${token_response}" | jq -r '.error_description // .error // "unknown token error"')"
-            echo "FAIL: could not obtain access token (${token_error})"
-            exit 1
-          fi
-          echo "  access token obtained"
-
-          echo "  GET ${api_url}"
-          api_http_code=""
-          api_response_file="$(mktemp)"
-          for attempt in $(seq 1 12); do
-            api_http_code="$(curl -sS -o "${api_response_file}" -w '%{http_code}' \
-              --connect-timeout 10 --max-time 30 \
-              -H "Authorization: Bearer ${access_token}" \
-              -H "Accept: application/json" \
-              "${api_url}" || echo '000')"
-            if [ "${api_http_code}" = "200" ]; then
-              break
-            fi
-            echo "  HTTP ${api_http_code:-000} (${attempt}/12)"
-            sleep 10
-          done
-          if [ "${api_http_code}" != "200" ]; then
-            echo "FAIL: ${api_url} returned HTTP ${api_http_code:-000}, expected 200"
-            if [ -s "${api_response_file}" ]; then
-              head -c 500 "${api_response_file}" || true
-              echo ""
-            fi
-            rm -f "${api_response_file}"
-            exit 1
-          fi
-          if jq -e '. == null' "${api_response_file}" >/dev/null 2>&1; then
-            echo "FAIL: ${api_url} returned null"
-            rm -f "${api_response_file}"
-            exit 1
-          fi
-          if ! jq -e 'type == "array"' "${api_response_file}" >/dev/null 2>&1; then
-            echo "FAIL: ${api_url} did not return a JSON array"
-            head -c 500 "${api_response_file}" || true
-            echo ""
-            rm -f "${api_response_file}"
-            exit 1
-          fi
-          environment_count="$(jq 'length' "${api_response_file}")"
-          if [ "${environment_count}" -eq 0 ]; then
-            echo "FAIL: ${api_url} returned an empty environments list (count=0)"
-            rm -f "${api_response_file}"
-            exit 1
-          fi
-          echo "  HTTP ${api_http_code} (environments: ${environment_count})"
-          echo "  environments:"
-          {
-            printf '%s\t%s\t%s\n' "NAME" "ID" "STATUS"
-            jq -r '.[] | [.name, .id, .status] | @tsv' "${api_response_file}"
-          } | column -t -s $'\t' | sed 's/^/  /'
-          environment_summary_table="$(jq -r '
-            ["| Name | ID | Status |", "| --- | --- | --- |"]
-            + [.[] | "| \(.name) | \(.id) | \(.status) |"]
-            | .[]
-          ' "${api_response_file}")"
-          rm -f "${api_response_file}"
-
-          not_ready="$(kubectl get pods -n "${INSTALL_NAMESPACE}" -o json \
-            | jq '[.items[] | select(.status.phase != "Running" and .status.phase != "Succeeded")] | length')"
-          if [ "${not_ready}" -gt 0 ]; then
-            echo "WARNING: ${not_ready} pod(s) not Running/Succeeded"
-            kubectl get pods -n "${INSTALL_NAMESPACE}" -o wide
-          fi
-
-          echo ""
-          echo "OK: all checks passed"
-          echo "UI: ${public_url}"
+          echo "Rolling back ${HELM_RELEASE} to the previous revision..."
+          helm rollback "${HELM_RELEASE}" 0 -n "${INSTALL_NAMESPACE}" --wait --timeout 10m
+          echo "Rollback complete. Current status:"
+          helm status "${HELM_RELEASE}" -n "${INSTALL_NAMESPACE}"
 
           {
-            echo "Deploy verification passed"
-            echo "branch/tag=${DEPLOY_REF}"
-            echo "chart=${CHART_PATH}:${CHART_VERSION}"
-            echo "namespace=${INSTALL_NAMESPACE}"
-            echo "UI: ${public_url}"
-            echo "environments API: ${api_url} (${environment_count} item(s))"
-            echo ""
-            echo "${environment_summary_table}"
+            echo "## Deploy rolled back"
+            echo "Release \`${HELM_RELEASE}\` in namespace \`${INSTALL_NAMESPACE}\` was rolled back to the previous revision after a failed deploy/healthcheck."
           } >> "$GITHUB_STEP_SUMMARY"
