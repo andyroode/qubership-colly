@@ -1,4 +1,4 @@
-# Image-only workflow (manual). Push builds use cicd-pipeline.yaml.
+# Image-only workflow (manual). Push builds use build_deploy_pipeline.yaml.
 name: Build Images
 on:
   workflow_dispatch:

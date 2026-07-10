@@ -10,7 +10,7 @@
 # image-tag — optional Docker tag override (leave empty to use refs from values.yaml)
 # helm-dry-run — render manifests only, do not apply
 #
-# Build workflow (cicd-pipeline.yaml) manual run:
+# Build workflow (build_deploy_pipeline.yaml) manual run:
 #   Build — build and publish Docker images, update chart values.yaml
 #   Deploy — deploy to EKS (optionally after Build)
 #   deploy-ref — branch or tag for Deploy; empty = current branch
