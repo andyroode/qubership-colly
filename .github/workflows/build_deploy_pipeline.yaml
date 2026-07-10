@@ -336,19 +336,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update chart image names and tags
-        uses: netcracker/qubership-workflow-hub/actions/charts-values-update-action@5a557213e92e3d22d0292330c4817c82af6704d2 # v2.1.2
-        with:
-          release-version: ${{ needs.prepare-metadata.outputs.image_tag }}
-          chart-version: ${{ needs.prepare-metadata.outputs.chart_version }}
-          config-file: .github/config/helm-chart-dev-config.yaml
-          create-release-branch: false
-          version-replace-method: parse
-          package-charts: false
-          publish-charts: false
-          default-tag: latest
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_ACTOR: ${{ github.actor }}
+          IMAGE_TAG: ${{ needs.prepare-metadata.outputs.image_tag }}
+          CHART_VERSION: ${{ needs.prepare-metadata.outputs.chart_version }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/build_deploy/update-chart-values.sh"
 
       - name: Commit updated chart values to branch
         shell: bash
